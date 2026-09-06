@@ -1,0 +1,40 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Variables de entorno y secretos
+.env
+*.env
+config_secrets.py
+
+# Bases de datos locales (no subir datos históricos)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Datos sensibles
+data/
+*.csv
+
+# Archivos de prueba locales
+scratch/
