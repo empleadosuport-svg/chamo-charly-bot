@@ -752,5 +752,5 @@ def insert_many(database_path: str | Path, rows: Iterable[tuple]) -> tuple[int, 
             """,
             rows_list,
         )
-        inserted = cursor.rowcount if cursor.rowcount > 0 else len(rows_list)
+        inserted = max(0, cursor.rowcount)
         return inserted, len(rows_list) - inserted
