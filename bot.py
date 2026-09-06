@@ -5,7 +5,7 @@ Features:
 2. Direct connection to Supabase PostgreSQL database.
 3. Automated Real-Time Verification at :15 past the hour (queries lottoactivo.com, records draw & updates weights).
 4. Automated Official Prediction Delivery at :30 past the hour (calculates & broadcasts next draw prediction).
-5. Automated Daily Consolidated Report at 19:30 PM (7:30 PM).
+5. Automated Daily Consolidated Report at 19:30 PM (7:30 PM) with full Financial ROI ($20 inv -> $30 payout).
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ flask_app = Flask(__name__)
 @flask_app.route("/health")
 def healthcheck():
     return jsonify({"status": "ok", "app": "Chamo Charly Bot",
-                    "chats_activor": len(authenticated_chats),
+                    "chats_activos": len(authenticated_chats),
                     "time": datetime.now().isoformat()}), 200
 
 def run_flask():
@@ -120,6 +120,18 @@ def rank_label(rank: int) -> str:
         return f"🛡️ *¡CAPTURADO EN MALLA TOP 20!* (Puesto #{rank})"
     else:
         return f"❌ *Fuera de Malla Top 20* (Puesto #{rank} de 36)"
+
+def financial_result_label(rank: int) -> str:
+    if rank <= 20:
+        return (
+            "💵 *BALANCE FINANCIERO DEL SORTEO:*\n"
+            "✅ *¡GANASTE $30 USD!* (Invertiste $20 en Malla Top 20 ➡️ Ganancia neta: *+$10 USD*)"
+        )
+    else:
+        return (
+            "💵 *BALANCE FINANCIERO DEL SORTEO:*\n"
+            "❌ *Perdiste $20 USD* (Invertiste $20 en Malla Top 20 y el ganador quedó fuera)."
+        )
 
 def get_active_prediction() -> dict:
     """Obtiene la predicción oficial guardada en la BD o la genera con coverage_prediction y la guarda."""
@@ -189,6 +201,13 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         for code, delta in pred.get('escalation', [])
     ])
 
+    financial_projection_str = (
+        "💰 *PROYECCIÓN DE INVERSIÓN (Paga 30x con $1/animal):*\n"
+        "  🛡️ *Malla Top 20 ($20 inv.):* Cobras *$30* (Ganancia neta: *+$10* | +50% ROI)\n"
+        "  🎯 *Top 10 ($10 inv.):* Cobras *$30* (Ganancia neta: *+$20* | +200% ROI)\n"
+        "  🏆 *Top 5 ($5 inv.):* Cobras *$30* (Ganancia neta: *+$25* | +500% ROI)"
+    )
+
     text = (
         f"🎯 *PREDICCIÓN BMA DIRICHLET*\n"
         f"📅 *Objetivo:* {pred['target_date']} a las {pred['target_time']}\n"
@@ -196,7 +215,8 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
         f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
         f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
-        f"⚡ *EMPUJE BAYESIANO*\n{escalation_str}"
+        f"⚡ *EMPUJE BAYESIANO*\n{escalation_str}\n\n"
+        f"{financial_projection_str}"
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -338,6 +358,7 @@ async def registrar_resultado_callback(query, context, code: str):
             f"✅ *RESULTADO REGISTRADO EN PRODUCCIÓN*\n\n"
             f"🐾 *Ganador:* `{code} - {animal}`\n"
             f"{rank_label(rank)}\n\n"
+            f"{financial_result_label(rank)}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔮 *SIGUIENTE PREDICCIÓN (Chamo Charly)* ({next_pred['target_date']} {next_pred['target_time']})\n\n"
             f"🏆 *TOP 5 PRINCIPAL:*\n{next_top5}"
@@ -457,6 +478,7 @@ async def scheduled_verification_job(app: Application, date_str: str, draw_time_
         f"📢 *RESULTADO OFICIAL DETECTADO ({draw_time_str})*\n\n"
         f"🐾 *Ganador:* `{code} - {animal}`\n"
         f"{rank_label(rank)}\n\n"
+        f"{financial_result_label(rank)}\n\n"
         f"🌐 *Verificar en sitio oficial:* [Lotto Activo](https://www.lottoactivo.com/resultados/lotto_activo/)\n"
         f"✅ *Base de Datos Supabase actualizada y aprendizaje de weights aplicado.*"
     )
@@ -485,13 +507,21 @@ async def scheduled_prediction_job(app: Application) -> None:
         for i, it in enumerate(next_pred['top11_20'])
     ])
 
+    financial_projection_str = (
+        "💰 *PROYECCIÓN DE INVERSIÓN (Paga 30x con $1/animal):*\n"
+        "  🛡️ *Malla Top 20 ($20 inv.):* Cobras *$30* (Ganancia neta: *+$10* | +50% ROI)\n"
+        "  🎯 *Top 10 ($10 inv.):* Cobras *$30* (Ganancia neta: *+$20* | +200% ROI)\n"
+        "  🏆 *Top 5 ($5 inv.):* Cobras *$30* (Ganancia neta: *+$25* | +500% ROI)"
+    )
+
     text = (
         f"🔮 *PREDICCIÓN OFICIAL AUTOMÁTICA*\n"
         f"📅 *Sorteo Objetivo:* {next_pred['target_date']} a las {next_pred['target_time']}\n"
         f"📊 *Experiencia:* {next_pred['observations']} sorteos acumulados\n\n"
         f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
         f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
-        f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}"
+        f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
+        f"{financial_projection_str}"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
@@ -524,21 +554,35 @@ async def scheduled_daily_summary_job(app: Application, date_str: str) -> None:
             if rank <= 5:
                 top5_hits += 1
                 icon = "🏆 Oro"
+                fin_change = "+$10"
             elif rank <= 10:
                 top10_hits += 1
                 icon = "🎯 Plata"
+                fin_change = "+$10"
             elif rank <= 20:
                 top20_hits += 1
                 icon = "🛡️ Bronce"
+                fin_change = "+$10"
             else:
                 icon = "❌ Fuera"
-            rows_str.append(f"  • `{time_s}`: {code}-{animal} -> {icon} (#{rank})")
+                fin_change = "-$20"
+            rows_str.append(f"  • `{time_s}`: {code}-{animal} -> {icon} (#{rank}) | {fin_change}")
         else:
             rows_str.append(f"  • `{time_s}`: {code}-{animal}")
 
     total = len(draws)
-    total_hits = top5_hits + top10_hits + top20_hits
-    acc_pct = (total_hits / total * 100) if total > 0 else 0.0
+    malla_hits = top5_hits + top10_hits + top20_hits
+    acc_pct = (malla_hits / total * 100) if total > 0 else 0.0
+
+    total_invested = total * 20
+    total_collected = malla_hits * 30
+    net_profit = total_collected - total_invested
+    roi_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0.0
+
+    if net_profit >= 0:
+        balance_label = f"🎉 *GANANCIA NETA DEL DÍA:* *+${net_profit} USD* (ROI: +{roi_pct:.1f}%)"
+    else:
+        balance_label = f"📉 *PÉRDIDA NETA DEL DÍA:* *-${abs(net_profit)} USD* (ROI: {roi_pct:.1f}%)"
 
     table_text = "\n".join(rows_str)
 
@@ -550,6 +594,10 @@ async def scheduled_daily_summary_job(app: Application, date_str: str) -> None:
         f"🎯 *Aciertos Top 10 (Plata):* {top10_hits}\n"
         f"🛡️ *Malla Top 20 (Bronce):* {top20_hits}\n"
         f"📈 *Efectividad Global:* {acc_pct:.1f}%\n\n"
+        f"💵 *BALANCE FINANCIERO DEL DÍA ($1/animal):*\n"
+        f"  💰 *Total Invertido:* ${total_invested} USD ($20 × {total} sorteos)\n"
+        f"  🤑 *Total Cobrado:* ${total_collected} USD ($30 × {malla_hits} aciertos en Malla)\n"
+        f"  {balance_label}\n\n"
         f"📋 *DETALLE POR HORARIO:*\n{table_text}\n\n"
         f"💚 *Chamo Charly Producción — Sincronizado en Supabase*"
     )
@@ -568,7 +616,6 @@ async def scheduler_loop(app: Application) -> None:
 
             # 1. Evento :15 (Verificación de sorteo anterior entre las 08:15 y 19:15)
             if 8 <= hour <= 19 and 15 <= minute <= 25:
-                # Hora del sorteo a verificar (e.g. si son las 08:15 -> verificar sorteo 08:00)
                 draw_time_str = f"{hour:02d}:00"
                 slot_key = f"{today_str}_{draw_time_str}_verify"
                 if slot_key not in executed_schedules:
@@ -593,7 +640,7 @@ async def scheduler_loop(app: Application) -> None:
         except Exception as exc:
             logger.error(f"Error en scheduler_loop: {exc}", exc_info=True)
 
-        await asyncio.sleep(40)  # Revisa cada 40 segundos
+        await asyncio.sleep(40)
 
 
 # ── Bot runner ────────────────────────────────────────────────────────────────
@@ -610,7 +657,6 @@ async def run_bot():
     await app.updater.start_polling(drop_pending_updates=True)
     logger.info("Bot de Telegram activo y escuchando con botones...")
 
-    # Iniciar la tarea del programador automático en background
     asyncio.create_task(scheduler_loop(app))
 
     try:
