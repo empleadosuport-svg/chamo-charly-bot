@@ -50,6 +50,9 @@ from chamo_charly.database import (
     prediction_for_target,
     save_prediction,
     verify_prediction,
+    load_auth_chats,
+    save_auth_chat,
+    remove_auth_chat,
 )
 from chamo_charly.predictor import coverage_prediction, next_target
 from chamo_charly.scraper import fetch_lotto_activo_draw, fetch_lotto_activo_day
@@ -69,6 +72,18 @@ BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 # ── State ─────────────────────────────────────────────────────────────────────
 authenticated_chats: set[int] = set()
+
+def _load_authenticated_chats() -> set[int]:
+    """Carga permanentemente los chats autenticados desde Supabase."""
+    global authenticated_chats
+    try:
+        authenticated_chats = load_auth_chats(DATABASE_PATH)
+        logger.info(f"Cargados {len(authenticated_chats)} chats autenticados desde Supabase.")
+    except Exception as exc:
+        logger.warning(f"No se pudieron cargar los chats autenticados de la BD: {exc}")
+        authenticated_chats = set()
+    return authenticated_chats
+
 # executed_schedules se persiste en Supabase para sobrevivir reinicios de Render
 # Formato de slot: "2026-09-06_08:15_verify" / "2026-09-06_08:30_predict" / "2026-09-06_19:30_summary"
 _executed_schedules_cache: set[str] = set()
@@ -309,6 +324,10 @@ async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if context.args[0] == BOT_PASSWORD:
         authenticated_chats.add(chat_id)
+        try:
+            save_auth_chat(DATABASE_PATH, chat_id)
+        except Exception as exc:
+            logger.warning(f"Error guardando auth chat {chat_id}: {exc}")
         await update.message.reply_text(
             "✅ *¡Acceso Concedido!*\n\n"
             "Bienvenido al panel oficial de Chamo Charly BMA.\n"
@@ -442,7 +461,12 @@ async def verificar_callback(query, context):
 
 
 async def logout_callback(query, context):
-    authenticated_chats.discard(query.message.chat_id)
+    chat_id = query.message.chat_id
+    authenticated_chats.discard(chat_id)
+    try:
+        remove_auth_chat(DATABASE_PATH, chat_id)
+    except Exception as exc:
+        logger.warning(f"Error eliminando auth chat {chat_id}: {exc}")
     await query.edit_message_text(
         "🔒 *Sesión cerrada exitosamente.*\n\n"
         "Escribe `/login <contraseña>` para volver a entrar.",
@@ -753,6 +777,8 @@ async def run_bot():
 
 def main():
     init_db(DATABASE_PATH)
+    _load_authenticated_chats()
+    _load_executed_schedules()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()

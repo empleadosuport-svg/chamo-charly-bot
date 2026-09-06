@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS scheduler_log (
     ejecutado_en TEXT NOT NULL,
     UNIQUE(fecha, slot_key)
 );
+
+CREATE TABLE IF NOT EXISTS auth_chats (
+    chat_id INTEGER PRIMARY KEY,
+    autenticado_en TEXT NOT NULL
+);
 """
 
 SCHEMA_POSTGRES = """
@@ -195,6 +200,11 @@ CREATE TABLE IF NOT EXISTS scheduler_log (
     slot_key VARCHAR(100) NOT NULL,
     ejecutado_en VARCHAR(50) NOT NULL,
     UNIQUE(fecha, slot_key)
+);
+
+CREATE TABLE IF NOT EXISTS auth_chats (
+    chat_id BIGINT PRIMARY KEY,
+    autenticado_en VARCHAR(50) NOT NULL
 );
 """
 
@@ -754,3 +764,27 @@ def insert_many(database_path: str | Path, rows: Iterable[tuple]) -> tuple[int, 
         )
         inserted = max(0, cursor.rowcount)
         return inserted, len(rows_list) - inserted
+
+
+def load_auth_chats(database_path: str | Path) -> set[int]:
+    with connect(database_path) as connection:
+        rows = connection.execute("SELECT chat_id FROM auth_chats").fetchall()
+    return {int(row["chat_id"]) for row in rows}
+
+
+def save_auth_chat(database_path: str | Path, chat_id: int) -> None:
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    with connect(database_path) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO auth_chats (chat_id, autenticado_en) VALUES (?, ?)",
+            (chat_id, now),
+        )
+
+
+def remove_auth_chat(database_path: str | Path, chat_id: int) -> None:
+    with connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM auth_chats WHERE chat_id = ?",
+            (chat_id,),
+        )
+
