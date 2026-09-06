@@ -122,6 +122,11 @@ class BayesianModelAveraging:
             for code in ANIMALS:
                 combined[code] += w * signal.get(code, 0.0)
 
+        # Apply Base Floor Smoothing (0.012) to protect coverage against cold animals
+        min_floor = 0.012
+        for code in combined:
+            combined[code] = max(combined[code], min_floor)
+
         # Normalize combined distribution
         total_prob = sum(combined.values())
         if total_prob > 0:
