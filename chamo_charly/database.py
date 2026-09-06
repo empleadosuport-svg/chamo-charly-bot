@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS pruebas_historicas (
     fecha_ejecucion TEXT NOT NULL,
     duracion_segundos REAL NOT NULL DEFAULT 0.0
 );
+
+CREATE TABLE IF NOT EXISTS scheduler_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha TEXT NOT NULL,
+    slot_key TEXT NOT NULL,
+    ejecutado_en TEXT NOT NULL,
+    UNIQUE(fecha, slot_key)
+);
 """
 
 SCHEMA_POSTGRES = """
@@ -179,6 +187,14 @@ CREATE TABLE IF NOT EXISTS pruebas_historicas (
     sorteos_prueba INTEGER NOT NULL DEFAULT 0,
     fecha_ejecucion VARCHAR(50) NOT NULL,
     duracion_segundos DOUBLE PRECISION NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS scheduler_log (
+    id SERIAL PRIMARY KEY,
+    fecha VARCHAR(10) NOT NULL,
+    slot_key VARCHAR(100) NOT NULL,
+    ejecutado_en VARCHAR(50) NOT NULL,
+    UNIQUE(fecha, slot_key)
 );
 """
 

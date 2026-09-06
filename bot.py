@@ -15,8 +15,19 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# Venezuela Time Zone (UTC-4, no DST)
+VET = ZoneInfo("America/Caracas")
+
+def now_vet() -> datetime:
+    """Hora actual en Venezuela (UTC-4). Usar SIEMPRE en lugar de datetime.now()."""
+    return datetime.now(vet_tz())
+
+def vet_tz():
+    return ZoneInfo("America/Caracas")
 
 from flask import Flask, jsonify
 
@@ -30,6 +41,7 @@ from telegram.ext import (
 
 from chamo_charly.catalog import ANIMALS, code_for_animal
 from chamo_charly.database import (
+    connect,
     init_db,
     insert_draw,
     recent_draws,
@@ -57,7 +69,43 @@ BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 # ── State ─────────────────────────────────────────────────────────────────────
 authenticated_chats: set[int] = set()
-executed_schedules: set[str] = set()  # Track executed schedule slots e.g. "2026-09-06_08:15_verify"
+# executed_schedules se persiste en Supabase para sobrevivir reinicios de Render
+# Formato de slot: "2026-09-06_08:15_verify" / "2026-09-06_08:30_predict" / "2026-09-06_19:30_summary"
+_executed_schedules_cache: set[str] = set()
+
+def _load_executed_schedules() -> set[str]:
+    """Carga los slots ejecutados hoy desde Supabase para sobrevivir reinicios."""
+    global _executed_schedules_cache
+    try:
+        today = now_vet().strftime("%Y-%m-%d")
+        with connect(DATABASE_PATH) as db:
+            cur = db.execute(
+                "SELECT slot_key FROM scheduler_log WHERE fecha = ?",
+                (today,)
+            )
+            rows = cur.fetchall()
+            _executed_schedules_cache = {r["slot_key"] for r in rows}
+    except Exception as exc:
+        logger.warning(f"No se pudo cargar scheduler_log (tabla quizás no existe aún): {exc}")
+        _executed_schedules_cache = set()
+    return _executed_schedules_cache
+
+def _mark_executed(slot_key: str) -> None:
+    """Persiste un slot ejecutado en Supabase Y en cache local."""
+    global _executed_schedules_cache
+    _executed_schedules_cache.add(slot_key)
+    try:
+        today = now_vet().strftime("%Y-%m-%d")
+        with connect(DATABASE_PATH) as db:
+            db.execute(
+                "INSERT OR IGNORE INTO scheduler_log (fecha, slot_key, ejecutado_en) VALUES (?, ?, ?)",
+                (today, slot_key, now_vet().isoformat())
+            )
+    except Exception as exc:
+        logger.warning(f"No se pudo persistir slot {slot_key}: {exc}")
+
+def _is_executed(slot_key: str) -> bool:
+    return slot_key in _executed_schedules_cache
 
 # ── Flask Keep-Alive ──────────────────────────────────────────────────────────
 flask_app = Flask(__name__)
@@ -67,7 +115,8 @@ flask_app = Flask(__name__)
 def healthcheck():
     return jsonify({"status": "ok", "app": "Chamo Charly Bot",
                     "chats_activos": len(authenticated_chats),
-                    "time": datetime.now().isoformat()}), 200
+                    "time_vet": now_vet().strftime("%Y-%m-%d %H:%M:%S VET"),
+                    "time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}), 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -489,9 +538,24 @@ async def scheduled_verification_job(app: Application, date_str: str, draw_time_
     return True
 
 
-async def scheduled_prediction_job(app: Application) -> None:
-    """Genera y emite la predicción oficial para el siguiente sorteo."""
-    next_pred = coverage_prediction(DATABASE_PATH)
+async def scheduled_prediction_job(
+    app: Application,
+    force_target_date: str | None = None,
+    force_target_time: str | None = None,
+) -> None:
+    """Genera y emite la predicción oficial para el siguiente sorteo.
+
+    Si se proporcionan force_target_date y force_target_time, la predicción se
+    calcula EXACTAMENTE para esa franja (evita que next_target() devuelva 08:00
+    repetidamente porque la BD aún no tiene sorteos del día).
+    """
+    if force_target_date and force_target_time:
+        from chamo_charly.predictor import coverage_prediction as _cov
+        from datetime import datetime as _dt
+        ref_time = _dt.strptime(f"{force_target_date} {force_target_time}", "%Y-%m-%d %H:%M")
+        next_pred = _cov(DATABASE_PATH, reference_time=ref_time)
+    else:
+        next_pred = coverage_prediction(DATABASE_PATH)
     save_prediction(DATABASE_PATH, next_pred)
 
     top5_str = "\n".join([
@@ -605,42 +669,66 @@ async def scheduled_daily_summary_job(app: Application, date_str: str) -> None:
 
 
 async def scheduler_loop(app: Application) -> None:
-    """Loop asincrónico que monitorea la hora para ejecutar eventos :15, :30 y 19:30."""
-    logger.info("Iniciando Programador Asincrónico Chamo Charly...")
+    """Loop asincrónico que monitorea la hora venezolana (VET, UTC-4) para:
+    - :15 → verificar resultado oficial en lottoactivo.com
+    - :30 → enviar predicción del siguiente sorteo
+    - 07:30 → predicción especial del primer sorteo del día (08:00 AM)
+    - 19:30 → resumen diario consolidado
+    Usa always now_vet() para hora venezolana, nunca datetime.now() que sería UTC en Render.
+    """
+    logger.info("Iniciando Programador Asincrónico Chamo Charly (zona horaria VET UTC-4)...")
+    # Cargar slots ya ejecutados hoy desde Supabase (sobrevive reinicios)
+    _load_executed_schedules()
+
     while True:
         try:
-            now = datetime.now()
+            now = now_vet()  # ← SIEMPRE hora venezolana
             today_str = now.strftime("%Y-%m-%d")
             hour = now.hour
             minute = now.minute
 
-            # 1. Evento :15 (Verificación de sorteo anterior entre las 08:15 y 19:15)
+            # ── Evento especial: 07:30 AM → Predicción del primer sorteo (08:00 AM) ──
+            # (antes del horario normal de 08:00-18:00)
+            if hour == 7 and 30 <= minute <= 45:
+                slot_key = f"{today_str}_07:30_predict"
+                if not _is_executed(slot_key):
+                    _mark_executed(slot_key)
+                    logger.info(f"[SCHEDULER VET] 07:30 → Generando predicción 08:00")
+                    await scheduled_prediction_job(app, force_target_date=today_str, force_target_time="08:00")
+
+            # ── Evento :15 → Verificar resultado oficial (08:15 hasta 19:15) ──
             if 8 <= hour <= 19 and 15 <= minute <= 25:
                 draw_time_str = f"{hour:02d}:00"
                 slot_key = f"{today_str}_{draw_time_str}_verify"
-                if slot_key not in executed_schedules:
+                if not _is_executed(slot_key):
+                    logger.info(f"[SCHEDULER VET] {hour:02d}:15 → Verificando resultado {draw_time_str}")
                     success = await scheduled_verification_job(app, today_str, draw_time_str)
                     if success:
-                        executed_schedules.add(slot_key)
+                        _mark_executed(slot_key)
 
-            # 2. Evento :30 (Envío de predicción para la siguiente hora entre 08:30 y 18:30)
-            if 8 <= hour <= 18 and minute == 30:
+            # ── Evento :30 → Predicción siguiente sorteo (09:30 hasta 18:30) ──
+            # (07:30 ya tiene su slot especial, 19:30 es el resumen)
+            if 8 <= hour <= 18 and 30 <= minute <= 45:
+                next_hour = hour + 1
+                next_time_str = f"{next_hour:02d}:00"
                 slot_key = f"{today_str}_{hour:02d}:30_predict"
-                if slot_key not in executed_schedules:
-                    executed_schedules.add(slot_key)
-                    await scheduled_prediction_job(app)
+                if not _is_executed(slot_key):
+                    _mark_executed(slot_key)
+                    logger.info(f"[SCHEDULER VET] {hour:02d}:30 → Generando predicción {next_time_str}")
+                    await scheduled_prediction_job(app, force_target_date=today_str, force_target_time=next_time_str)
 
-            # 3. Evento 19:30 PM (Resumen Diario Consolidado)
-            if hour == 19 and minute == 30:
+            # ── Evento 19:30 PM → Resumen Diario Consolidado ──
+            if hour == 19 and 30 <= minute <= 45:
                 slot_key = f"{today_str}_19:30_summary"
-                if slot_key not in executed_schedules:
-                    executed_schedules.add(slot_key)
+                if not _is_executed(slot_key):
+                    _mark_executed(slot_key)
+                    logger.info(f"[SCHEDULER VET] 19:30 → Resumen diario")
                     await scheduled_daily_summary_job(app, today_str)
 
         except Exception as exc:
             logger.error(f"Error en scheduler_loop: {exc}", exc_info=True)
 
-        await asyncio.sleep(40)
+        await asyncio.sleep(30)  # Revisar cada 30 segundos para no perder ventanas de 15 min
 
 
 # ── Bot runner ────────────────────────────────────────────────────────────────
