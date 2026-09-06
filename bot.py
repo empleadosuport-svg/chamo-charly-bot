@@ -1,62 +1,66 @@
 """Telegram Bot and Keep-Alive Server for Chamo Charly Producción.
 
 Designed for 24/7 deployment on Render / Cloud Free VPS with UptimeRobot pinging.
+Fully driven by inline keyboard buttons — no slash commands needed after login.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import threading
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+
 from flask import Flask, jsonify
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
 
-from chamo_charly.catalog import ANIMALS, code_for_animal, validate_result
+from chamo_charly.catalog import ANIMALS, code_for_animal
 from chamo_charly.database import (
-    chronological_draws,
     init_db,
     insert_draw,
-    latest_prediction,
     recent_draws,
-    save_prediction,
 )
 from chamo_charly.predictor import bma_prediction
 from chamo_charly.verificador_diario import run_daily_verification
 
-# Set up logging
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
+# ── Config ────────────────────────────────────────────────────────────────────
 DATABASE_PATH = Path("data/chamo_charly.db")
-BOT_PASSWORD = os.environ.get("BOT_PASSWORD", "Charly2026")
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+BOT_PASSWORD  = os.environ.get("BOT_PASSWORD", "Charly2026")
+BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# In-memory authentication sessions (Chat IDs)
+# ── State ─────────────────────────────────────────────────────────────────────
 authenticated_chats: set[int] = set()
 
-# Flask Keep-Alive Server
-flask_app = Flask(__name__)
+# ConversationHandler state for resultado entry
+WAITING_RESULTADO = 1
 
+# ── Flask Keep-Alive ──────────────────────────────────────────────────────────
+flask_app = Flask(__name__)
 
 @flask_app.route("/")
 @flask_app.route("/health")
 def healthcheck():
-    return jsonify({"status": "ok", "app": "Chamo Charly Bot", "time": datetime.now().isoformat()}), 200
-
+    return jsonify({"status": "ok", "app": "Chamo Charly Bot",
+                    "time": datetime.now().isoformat()}), 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -64,196 +68,304 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
-# Telegram Bot Command Handlers
+# ── Keyboards ─────────────────────────────────────────────────────────────────
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Menú principal con botones grandes."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 Ver Predicción", callback_data="prediccion")],
+        [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
+        [InlineKeyboardButton("📊 Verificar Sistema", callback_data="verificar"),
+         InlineKeyboardButton("🔒 Cerrar Sesión", callback_data="logout")],
+    ])
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    """Botón para volver al menú."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Volver al Menú", callback_data="menu")]
+    ])
+
+def resultado_keyboard(top_animals: list[dict]) -> InlineKeyboardMarkup:
+    """Grid de los top animales predichos como botones de resultado."""
+    buttons = []
+    row = []
+    for i, item in enumerate(top_animals[:20]):
+        label = f"{item['codigo']} {item['animal']}"
+        row.append(InlineKeyboardButton(label, callback_data=f"res_{item['codigo']}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("⬅️ Cancelar", callback_data="menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def is_auth(chat_id: int) -> bool:
+    return chat_id in authenticated_chats
+
+def rank_label(rank: int) -> str:
+    if rank <= 5:
+        return f"🏆 *¡ACIERTO DIRECTO EN TOP 5!* (Puesto #{rank})"
+    elif rank <= 10:
+        return f"🎯 *¡ACIERTO EN TOP 10!* (Puesto #{rank})"
+    elif rank <= 20:
+        return f"🛡️ *¡CAPTURADO EN MALLA TOP 20!* (Puesto #{rank})"
+    else:
+        return f"❌ *Fuera de Malla Top 20* (Puesto #{rank} de 36)"
+
+async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
+                          edit_message=None) -> None:
+    """Calcula y envía/edita la predicción con botones de resultado."""
+    pred = bma_prediction(DATABASE_PATH)
+    top5_str = "\n".join([
+        f"  {i+1}. *{it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%})"
+        for i, it in enumerate(pred['top5'])
+    ])
+    top6_10_str = "\n".join([
+        f"  {i+6}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
+        for i, it in enumerate(pred['top10'][5:10])
+    ])
+    top11_20_str = "\n".join([
+        f"  {i+11}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
+        for i, it in enumerate(pred['top11_20'])
+    ])
+    escalation_str = "\n".join([
+        f"  🔥 *{code} - {ANIMALS.get(code, code)}* (+{delta*100:.2f}%)"
+        for code, delta in pred['escalation']
+    ])
+
+    text = (
+        f"🎯 *PREDICCIÓN BMA DIRICHLET*\n"
+        f"📅 *Objetivo:* {pred['target_date']} a las {pred['target_time']}\n"
+        f"📊 *Experiencia:* {pred['observations']} sorteos acumulados\n\n"
+        f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
+        f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
+        f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
+        f"⚡ *EMPUJE BAYESIANO*\n{escalation_str}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
+        [InlineKeyboardButton("🔄 Actualizar Predicción", callback_data="prediccion"),
+         InlineKeyboardButton("⬅️ Menú", callback_data="menu")],
+    ])
+
+    if edit_message:
+        await edit_message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    else:
+        await context.bot.send_message(chat_id, text,
+                                       parse_mode="Markdown", reply_markup=keyboard)
+
+
+# ── /start ────────────────────────────────────────────────────────────────────
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if chat_id in authenticated_chats:
-        text = (
-            "🤖 *Bienvenido a Chamo Charly Producción*\n\n"
-            "✅ *Sesión Activa*\n\n"
-            "Comandos disponibles:\n"
-            "• `/prediccion` — Obtener predicción activa BMA Dirichlet (4 Niveles)\n"
-            "• `/resultado <animal_o_codigo>` — Registrar resultado real y auditar acierto\n"
-            "• `/verificar` — Auditar la salud del sistema y total de sorteos\n"
-            "• `/logout` — Cerrar sesión"
+    if is_auth(chat_id):
+        await update.message.reply_text(
+            "🤖 *Chamo Charly — Panel Principal*\n\n"
+            "Selecciona una opción:",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
         )
     else:
-        text = (
+        await update.message.reply_text(
             "🔒 *Bot Protegido — Chamo Charly*\n\n"
-            "Para acceder a las predicciones y funciones del sistema, por favor inicia sesión:\n\n"
-            "👉 `/login <tu_contraseña>`"
+            "Para acceder escribe:\n"
+            "`/login <tu_contraseña>`",
+            parse_mode="Markdown",
         )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 
+# ── /login ────────────────────────────────────────────────────────────────────
 async def login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/login <contraseña>`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "⚠️ Uso: `/login <contraseña>`", parse_mode="Markdown"
+        )
         return
 
-    provided_password = context.args[0]
-    if provided_password == BOT_PASSWORD:
+    if context.args[0] == BOT_PASSWORD:
         authenticated_chats.add(chat_id)
         await update.message.reply_text(
-            "✅ *Acceso Concedido*\n\n"
+            "✅ *¡Acceso Concedido!*\n\n"
             "Bienvenido al panel oficial de Chamo Charly BMA.\n"
-            "Usa `/prediccion` para obtener la predicción activa.",
+            "Selecciona una opción:",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ *Contraseña incorrecta.* Intenta de nuevo con `/login <clave>`.",
             parse_mode="Markdown",
         )
-    else:
-        await update.message.reply_text("❌ *Contraseña incorrecta.* Intenta de nuevo con `/login <clave>`.", parse_mode="Markdown")
 
 
-async def logout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    authenticated_chats.discard(chat_id)
-    await update.message.reply_text("🔒 *Sesión cerrada exitosamente.*", parse_mode="Markdown")
+# ── Callback: menú principal ──────────────────────────────────────────────────
+async def menu_callback(query, context):
+    await query.edit_message_text(
+        "🤖 *Chamo Charly — Panel Principal*\n\nSelecciona una opción:",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
-def is_auth(update: Update) -> bool:
-    return update.effective_chat.id in authenticated_chats
+# ── Callback: predicción ──────────────────────────────────────────────────────
+async def prediccion_callback(query, context):
+    await query.edit_message_text("⏳ Calculando predicción BMA Dirichlet...")
+    try:
+        await send_prediccion(query.message.chat_id, context, edit_message=query.message)
+    except Exception as exc:
+        logger.error(f"Error predicción: {exc}", exc_info=True)
+        await query.edit_message_text(f"❌ Error al calcular predicción: {exc}",
+                                      reply_markup=back_keyboard())
 
 
-async def prediccion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_auth(update):
-        await update.message.reply_text("🔒 *Acceso denegado.* Por favor inicia sesión con `/login <clave>`.", parse_mode="Markdown")
-        return
-
-    msg = await update.message.reply_text("⏳ Calculando predicción BMA Dirichlet (1 Año de Experiencia)...")
+# ── Callback: mostrar grid de resultado ───────────────────────────────────────
+async def resultado_callback(query, context):
+    """Muestra los 20 animales predichos como botones para seleccionar el ganador."""
+    await query.edit_message_text("⏳ Cargando animales predichos...")
     try:
         pred = bma_prediction(DATABASE_PATH)
-        top5_str = "\n".join([f"  {i+1}. *{item['codigo']} - {item['animal']}* ({item['probabilidad']:.2%})" for i, item in enumerate(pred['top5'])])
-        top6_10_str = "\n".join([f"  {i+6}. {item['codigo']} - {item['animal']} ({item['probabilidad']:.2%})" for i, item in enumerate(pred['top10'][5:10])])
-        top11_20_str = "\n".join([f"  {i+11}. {item['codigo']} - {item['animal']} ({item['probabilidad']:.2%})" for i, item in enumerate(pred['top11_20'])])
-        escalation_str = "\n".join([f"  🔥 *{code} - {ANIMALS.get(code, code)}* (+{delta*100:.2f}%)" for code, delta in pred['escalation']])
+        all_animals = pred.get("ranking", pred.get("top11_20", []))[:20]
+        # Combine top5 + top10 + top11_20 in order
+        ranking = pred.get("ranking", None)
+        if ranking is None:
+            ranking = pred["top5"] + pred["top10"][5:] + pred.get("top11_20", [])
 
-        response_text = (
-            f"🎯 *PREDICCIÓN BMA DIRICHLET*\n"
-            f"📅 *Objetivo:* {pred['target_date']} a las {pred['target_time']}\n"
-            f"📊 *Experiencia:* {pred['observations']} sorteos acumulados\n\n"
-            f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
-            f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
-            f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
-            f"⚡ *EMPUJE BAYESIANO (TOP ESCALADA)*\n{escalation_str}"
+        await query.edit_message_text(
+            "✅ *¿Cuál fue el animal ganador?*\n\n"
+            "Toca el animal que salió en el sorteo:",
+            parse_mode="Markdown",
+            reply_markup=resultado_keyboard(ranking[:20]),
         )
-        await msg.edit_text(response_text, parse_mode="Markdown")
     except Exception as exc:
-        logger.error(f"Error generando predicción: {exc}", exc_info=True)
-        await msg.edit_text(f"❌ Error al calcular predicción: {exc}")
+        logger.error(f"Error cargando resultado: {exc}", exc_info=True)
+        await query.edit_message_text(f"❌ Error: {exc}", reply_markup=back_keyboard())
 
 
-async def resultado_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_auth(update):
-        await update.message.reply_text("🔒 *Acceso denegado.* Por favor inicia sesión con `/login <clave>`.", parse_mode="Markdown")
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/resultado <codigo_o_animal>` (Ejemplo: `/resultado 34` o `/resultado Venado`)", parse_mode="Markdown")
-        return
-
-    raw_input = " ".join(context.args).strip()
-    # Resolve code
-    code = None
-    if raw_input in ANIMALS:
-        code = raw_input
-        animal = ANIMALS[code]
-    else:
-        # Check animal name search
-        code = code_for_animal(raw_input)
-        animal = ANIMALS.get(code, raw_input) if code else raw_input
-
-    if not code:
-        await update.message.reply_text(f"❌ No se pudo identificar el animal o código '{raw_input}'.", parse_mode="Markdown")
-        return
-
-    msg = await update.message.reply_text(f"⏳ Registrando resultado *{code} - {animal}* y auditando acierto...", parse_mode="Markdown")
+# ── Callback: registrar resultado específico ──────────────────────────────────
+async def registrar_resultado_callback(query, context, code: str):
+    """Registra el animal ganador y muestra auditoría + siguiente predicción."""
+    animal = ANIMALS.get(code, code)
+    await query.edit_message_text(
+        f"⏳ Registrando *{code} - {animal}* y calculando siguiente predicción...",
+        parse_mode="Markdown",
+    )
     try:
-        # Determine latest draw slot or current draw target
+        pred = bma_prediction(DATABASE_PATH)
+        ranking = pred.get("ranking", pred["top5"] + pred["top10"][5:] + pred.get("top11_20", []))
+        rank = next((idx + 1 for idx, it in enumerate(ranking) if it["codigo"] == code), 37)
+
         latest = recent_draws(DATABASE_PATH, 1)
         if latest:
-            last_dt = datetime.strptime(f"{latest[0]['fecha_sorteo']} {latest[0]['hora_sorteo']}", "%Y-%m-%d %H:%M")
-            if last_dt.hour >= 19:
-                next_dt = (last_dt.replace(hour=8, minute=0) + timedelta(days=1))
-            else:
-                next_dt = last_dt.replace(minute=0, second=0) + timedelta(hours=1)
+            last_dt = datetime.strptime(
+                f"{latest[0]['fecha_sorteo']} {latest[0]['hora_sorteo']}", "%Y-%m-%d %H:%M"
+            )
+            next_dt = last_dt + timedelta(hours=1)
         else:
-            next_dt = datetime.now().replace(minute=0, second=0)
+            next_dt = datetime.now().replace(minute=0, second=0, microsecond=0)
 
         draw_date_str = next_dt.strftime("%Y-%m-%d")
         draw_time_str = next_dt.strftime("%H:%M")
-        weekday_str = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"][next_dt.weekday()]
+        weekday_str = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"][next_dt.weekday()]
 
-        # Generate prediction prior to insert for audit
-        pred = bma_prediction(DATABASE_PATH)
-        
-        # Rank of winner
-        rank = next((idx + 1 for idx, item in enumerate(pred["ranking"]) if item["codigo"] == code), 38)
-        
-        if rank <= 5:
-            tier_msg = f"🏆 *¡ACIERTO DIRECTO EN TOP 5!* (Puesto #{rank})"
-        elif rank <= 10:
-            tier_msg = f"🎯 *¡ACIERTO EN TOP 10!* (Puesto #{rank})"
-        elif rank <= 20:
-            tier_msg = f"🛡️ *¡CAPTURADO EN MALLA TOP 20!* (Puesto #{rank})"
-        else:
-            tier_msg = f"❌ *Fuera de Malla Top 20* (Puesto #{rank})"
-
-        # Insert draw into DB
-        now_iso = datetime.now().isoformat()
         insert_draw(
-            DATABASE_PATH,
-            draw_date_str,
-            draw_time_str,
-            code,
-            animal,
-            weekday_str,
-            fuente="telegram_bot",
-            capturado_en=now_iso,
-            estado="confirmado",
+            DATABASE_PATH, draw_date_str, draw_time_str, code, animal,
+            weekday_str, fuente="telegram_bot",
+            capturado_en=datetime.now().isoformat(), estado="confirmado",
         )
 
-        # Generate next prediction post-insert
         next_pred = bma_prediction(DATABASE_PATH)
+        next_top5 = "\n".join([
+            f"  {i+1}. *{it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%})"
+            for i, it in enumerate(next_pred["top5"])
+        ])
 
-        response_text = (
-            f"✅ *RESULTADO REGISTRADO EXITOSAMENTE*\n\n"
-            f"📌 *Sorteo:* {draw_date_str} {draw_time_str}\n"
+        text = (
+            f"✅ *RESULTADO REGISTRADO*\n\n"
             f"🐾 *Ganador:* `{code} - {animal}`\n"
-            f"{tier_msg}\n\n"
+            f"{rank_label(rank)}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔮 *SIGUIENTE PREDICCIÓN ( BMA DIRICHLET )*\n"
-            f"📅 *Objetivo:* {next_pred['target_date']} a las {next_pred['target_time']}\n\n"
-            f"🏆 *TOP 5 PRINCIPAL:*\n" +
-            "\n".join([f"  {i+1}. *{item['codigo']} - {item['animal']}* ({item['probabilidad']:.2%})" for i, item in enumerate(next_pred['top5'])])
+            f"🔮 *PRÓXIMA PREDICCIÓN* ({next_pred['target_date']} {next_pred['target_time']})\n\n"
+            f"🏆 *TOP 5:*\n{next_top5}"
         )
-        await msg.edit_text(response_text, parse_mode="Markdown")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 Ver Predicción Completa", callback_data="prediccion")],
+            [InlineKeyboardButton("⬅️ Menú Principal", callback_data="menu")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
     except Exception as exc:
         logger.error(f"Error registrando resultado: {exc}", exc_info=True)
-        await msg.edit_text(f"❌ Error al registrar resultado: {exc}")
+        await query.edit_message_text(f"❌ Error: {exc}", reply_markup=back_keyboard())
 
 
-async def verificar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_auth(update):
-        await update.message.reply_text("🔒 *Acceso denegado.* Por favor inicia sesión con `/login <clave>`.", parse_mode="Markdown")
+# ── Callback: verificar ───────────────────────────────────────────────────────
+async def verificar_callback(query, context):
+    await query.edit_message_text("⏳ Auditando sistema...")
+    try:
+        status = run_daily_verification(DATABASE_PATH)
+        top5_str = "\n".join([f"  • {it}" for it in status["top5_principal"]])
+        empuje_str = "\n".join([f"  🔥 {it}" for it in status["empuje_bayesiano"]])
+        text = (
+            f"🏥 *AUDITORÍA DEL SISTEMA*\n\n"
+            f"📊 *Sorteos Acumulados:* {status['total_sorteos']}\n"
+            f"📌 *Último Sorteo:* {status['ultimo_sorteo']}\n"
+            f"🎯 *Próximo Objetivo:* {status['proximo_objetivo']}\n\n"
+            f"🏆 *TOP 5:*\n{top5_str}\n\n"
+            f"⚡ *EMPUJE BAYESIANO:*\n{empuje_str}\n\n"
+            f"💚 *Estado:* {status['salud_sistema']}"
+        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+    except Exception as exc:
+        logger.error(f"Error verificando: {exc}", exc_info=True)
+        await query.edit_message_text(f"❌ Error: {exc}", reply_markup=back_keyboard())
+
+
+# ── Callback: logout ──────────────────────────────────────────────────────────
+async def logout_callback(query, context):
+    authenticated_chats.discard(query.message.chat_id)
+    await query.edit_message_text(
+        "🔒 *Sesión cerrada exitosamente.*\n\n"
+        "Escribe `/login <contraseña>` para volver a entrar.",
+        parse_mode="Markdown",
+    )
+
+
+# ── Router principal de callbacks ─────────────────────────────────────────────
+async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    # Verificar sesión (excepto logout)
+    if not is_auth(chat_id) and query.data != "logout":
+        await query.edit_message_text(
+            "🔒 *Sesión expirada.*\n\nEscribe `/login <contraseña>` para volver a entrar.",
+            parse_mode="Markdown",
+        )
         return
 
-    status = run_daily_verification(DATABASE_PATH)
-    top5_str = "\n".join([f"  • {item}" for item in status["top5_principal"]])
-    empuje_str = "\n".join([f"  🔥 {item}" for item in status["empuje_bayesiano"]])
+    data = query.data
 
-    text = (
-        f"🏥 *AUDITORÍA Y SALUD DEL SISTEMA*\n\n"
-        f"📊 *Sorteos Acumulados:* {status['total_sorteos']}\n"
-        f"📌 *Último Sorteo:* {status['ultimo_sorteo']}\n"
-        f"🎯 *Próximo Objetivo:* {status['proximo_objetivo']}\n\n"
-        f"🏆 *TOP 5 PRINCIPAL:*\n{top5_str}\n\n"
-        f"⚡ *EMPUJE BAYESIANO:*\n{empuje_str}\n\n"
-        f"💚 *Estado:* {status['salud_sistema']}"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    if data == "menu":
+        await menu_callback(query, context)
+    elif data == "prediccion":
+        await prediccion_callback(query, context)
+    elif data == "resultado":
+        await resultado_callback(query, context)
+    elif data.startswith("res_"):
+        code = data.replace("res_", "")
+        await registrar_resultado_callback(query, context, code)
+    elif data == "verificar":
+        await verificar_callback(query, context)
+    elif data == "logout":
+        await logout_callback(query, context)
 
 
+# ── Bot runner ────────────────────────────────────────────────────────────────
 async def run_bot():
     """Corre el bot de Telegram en el event loop principal."""
     logger.info("Iniciando Bot de Telegram Chamo Charly...")
@@ -261,17 +373,13 @@ async def run_bot():
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("login", login_handler))
-    app.add_handler(CommandHandler("logout", logout_handler))
-    app.add_handler(CommandHandler("prediccion", prediccion_handler))
-    app.add_handler(CommandHandler("resultado", resultado_handler))
-    app.add_handler(CommandHandler("verificar", verificar_handler))
+    app.add_handler(CallbackQueryHandler(button_router))
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Bot de Telegram activo y escuchando...")
+    logger.info("Bot de Telegram activo y escuchando con botones...")
 
-    # Keep running until interrupted
     try:
         await asyncio.Event().wait()
     finally:
@@ -283,16 +391,12 @@ async def run_bot():
 def main():
     init_db(DATABASE_PATH)
 
-    # 1. Start Flask HTTP Keep-Alive server in daemon thread
+    # Flask en hilo daemon
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # 2. Start Telegram Bot in main thread using asyncio.run()
     if not BOT_TOKEN:
-        logger.warning(
-            "TELEGRAM_BOT_TOKEN no configurado. El servidor Keep-Alive HTTP está activo, "
-            "pero el bot de Telegram requiere TELEGRAM_BOT_TOKEN para conectarse a Telegram."
-        )
+        logger.warning("TELEGRAM_BOT_TOKEN no configurado.")
         flask_thread.join()
         return
 
