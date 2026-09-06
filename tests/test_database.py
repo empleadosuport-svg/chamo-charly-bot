@@ -4,6 +4,7 @@ import pytest
 
 from chamo_charly.catalog import ANIMALS, animal_for_code, code_for_animal, validate_result
 from chamo_charly.database import (
+    BASE_WEIGHTS,
     chronological_draws,
     confirm_provisional_draw,
     context_weights,
@@ -151,8 +152,8 @@ def test_prediction_records_winner_position_and_band(tmp_path):
     assert verified["ranking_completo"]
     assert latest_prediction(database_path)["id"] == prediction_id
     weights = context_weights(database_path, 19, 4)
-    assert weights["hora"] == pytest.approx(0.335)
-    assert weights["base"] == pytest.approx(0.165)
+    assert weights["hora"] == pytest.approx(BASE_WEIGHTS["hora"] + 0.015)
+    assert weights["base"] == pytest.approx(BASE_WEIGHTS["base"] - 0.015)
 
 
 def test_chronological_draws_and_recent_signal_order(tmp_path):

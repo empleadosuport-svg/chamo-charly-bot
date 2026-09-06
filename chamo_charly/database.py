@@ -208,15 +208,16 @@ CREATE TABLE IF NOT EXISTS auth_chats (
 );
 """
 
-PILLARS = ("base", "hora", "dia_hora", "markov", "reciente", "penalizacion", "piramide")
+PILLARS = ("base", "hora", "dia_hora", "markov", "reciente", "penalizacion", "piramide", "eco_desplazado")
 BASE_WEIGHTS = {
-    "base": 0.18,
-    "hora": 0.32,
-    "dia_hora": 0.22,
-    "markov": 0.16,
-    "reciente": 0.10,
-    "penalizacion": 0.02,
-    "piramide": 0.03,
+    "base": 0.14,
+    "hora": 0.22,
+    "dia_hora": 0.16,
+    "markov": 0.12,
+    "reciente": 0.12,
+    "penalizacion": 0.08,
+    "piramide": 0.05,
+    "eco_desplazado": 0.08,
 }
 
 def get_database_url() -> str | None:

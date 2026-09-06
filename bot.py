@@ -198,7 +198,7 @@ def financial_result_label(rank: int) -> str:
 
 def get_active_prediction() -> dict:
     """Obtiene la predicción oficial guardada en la BD o la genera con coverage_prediction y la guarda."""
-    target_date, target_time = next_target(DATABASE_PATH)
+    target_date, target_time = next_target(DATABASE_PATH, reference_time=now_vet())
     latest = latest_prediction(DATABASE_PATH)
     
     if latest and latest.get("objetivo_fecha") == target_date and latest.get("objetivo_hora") == target_time:
@@ -225,7 +225,7 @@ def get_active_prediction() -> dict:
         }
 
     # Si no existe en la BD para este objetivo, generar con el motor oficial de Chamo Charly y guardar
-    pred = coverage_prediction(DATABASE_PATH)
+    pred = coverage_prediction(DATABASE_PATH, reference_time=now_vet())
     pred_id = save_prediction(DATABASE_PATH, pred)
     pred["id"] = pred_id
     return pred
@@ -247,16 +247,20 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
                           edit_message=None) -> None:
     """Muestra la predicción oficial proveniente de Chamo Charly Producción."""
     pred = get_active_prediction()
+    
+    def _eco_badge(item: dict) -> str:
+        return " ⚡ *Eco 24h*" if item.get("eco_desplazado", 0.0) > 0.05 else ""
+
     top5_str = "\n".join([
-        f"  {i+1}. *{it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%})"
+        f"  🥇 *{i+1}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top5'])
     ])
     top6_10_str = "\n".join([
-        f"  {i+6}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
+        f"  🥈 *{i+6}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top10'][5:10])
     ])
     top11_20_str = "\n".join([
-        f"  {i+11}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
+        f"  🥉 *{i+11}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top11_20'])
     ])
     escalation_str = "\n".join([
@@ -272,12 +276,12 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     )
 
     text = (
-        f"🎯 *PREDICCIÓN BMA DIRICHLET*\n"
+        f"🎯 *PREDICCIÓN OFICIAL BMA (8 PILARES)*\n"
         f"📅 *Objetivo:* {pred['target_date']} a las {pred['target_time']}\n"
         f"📊 *Experiencia:* {pred['observations']} sorteos acumulados\n\n"
-        f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
-        f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
-        f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
+        f"🏆 *TOP 5 SELECCIÓN ORO*\n{top5_str}\n\n"
+        f"🎯 *TOP 6–10 SELECCIÓN PLATA*\n{top6_10_str}\n\n"
+        f"🛡️ *TOP 11–20 SELECCIÓN BRONCE*\n{top11_20_str}\n\n"
         f"⚡ *EMPUJE BAYESIANO*\n{escalation_str}\n\n"
         f"{financial_projection_str}"
     )
