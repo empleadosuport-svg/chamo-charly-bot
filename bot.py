@@ -128,9 +128,8 @@ def run_flask():
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Menú principal con botones grandes."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Ver Predicción", callback_data="prediccion")],
-        [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
-        [InlineKeyboardButton("📊 Verificar Sistema", callback_data="verificar"),
+        [InlineKeyboardButton("🎯 Ver Predicción Oficial", callback_data="prediccion")],
+        [InlineKeyboardButton("📊 Estado del Sistema", callback_data="verificar"),
          InlineKeyboardButton("🔒 Cerrar Sesión", callback_data="logout")],
     ])
 
@@ -269,9 +268,8 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     )
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
         [InlineKeyboardButton("🔄 Actualizar Predicción", callback_data="prediccion"),
-         InlineKeyboardButton("⬅️ Menú", callback_data="menu")],
+         InlineKeyboardButton("⬅️ Menú Principal", callback_data="menu")],
     ])
 
     if edit_message:
