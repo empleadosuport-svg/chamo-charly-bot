@@ -457,9 +457,13 @@ async def scheduled_verification_job(app: Application, date_str: str, draw_time_
         f"📢 *RESULTADO OFICIAL DETECTADO ({draw_time_str})*\n\n"
         f"🐾 *Ganador:* `{code} - {animal}`\n"
         f"{rank_label(rank)}\n\n"
+        f"🌐 *Verificar en sitio oficial:* [Lotto Activo](https://www.lottoactivo.com/resultados/lotto_activo/)\n"
         f"✅ *Base de Datos Supabase actualizada y aprendizaje de weights aplicado.*"
     )
-    await broadcast_message(app, text)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Verificar en Lotto Activo", url="https://www.lottoactivo.com/resultados/lotto_activo/")]
+    ])
+    await broadcast_message(app, text, reply_markup=keyboard)
     return True
 
 
