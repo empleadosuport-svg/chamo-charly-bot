@@ -5,11 +5,12 @@ Designed for 24/7 deployment on Render / Cloud Free VPS with UptimeRobot pinging
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import threading
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from flask import Flask, jsonify
 
@@ -253,22 +254,8 @@ async def verificar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-def main():
-    init_db(DATABASE_PATH)
-
-    # 1. Start Flask HTTP Keep-Alive server in daemon thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    # 2. Start Telegram Bot Application
-    if not BOT_TOKEN:
-        logger.warning(
-            "TELEGRAM_BOT_TOKEN no configurado. El servidor Keep-Alive HTTP está activo, pero el bot de Telegram requiere TELEGRAM_BOT_TOKEN para conectarse a Telegram."
-        )
-        # Keep main thread alive for Flask
-        flask_thread.join()
-        return
-
+async def run_bot():
+    """Corre el bot de Telegram en el event loop principal."""
     logger.info("Iniciando Bot de Telegram Chamo Charly...")
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -279,7 +266,37 @@ def main():
     app.add_handler(CommandHandler("resultado", resultado_handler))
     app.add_handler(CommandHandler("verificar", verificar_handler))
 
-    app.run_polling(drop_pending_updates=True)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Bot de Telegram activo y escuchando...")
+
+    # Keep running until interrupted
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
+def main():
+    init_db(DATABASE_PATH)
+
+    # 1. Start Flask HTTP Keep-Alive server in daemon thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # 2. Start Telegram Bot in main thread using asyncio.run()
+    if not BOT_TOKEN:
+        logger.warning(
+            "TELEGRAM_BOT_TOKEN no configurado. El servidor Keep-Alive HTTP está activo, "
+            "pero el bot de Telegram requiere TELEGRAM_BOT_TOKEN para conectarse a Telegram."
+        )
+        flask_thread.join()
+        return
+
+    asyncio.run(run_bot())
 
 
 if __name__ == "__main__":
