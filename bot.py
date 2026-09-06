@@ -383,8 +383,7 @@ async def registrar_resultado_callback(query, context, code: str):
         # 1. Guardar el sorteo en la tabla 'sorteos'
         insert_draw(
             DATABASE_PATH, target_date_str, target_time_str, code, animal,
-            weekday_str, fuente="telegram_bot",
-            capturado_en=datetime.now().isoformat(), estado="confirmado",
+            weekday_str, source="telegram_bot", status="confirmado",
         )
 
         # 2. Verificar la predicción activa si tiene ID
@@ -509,8 +508,7 @@ async def scheduled_verification_job(app: Application, date_str: str, draw_time_
     try:
         insert_draw(
             DATABASE_PATH, date_str, draw_time_str, code, animal,
-            weekday_str, fuente="lotto_activo_auto",
-            capturado_en=datetime.now().isoformat(), estado="confirmado",
+            weekday_str, source="lotto_activo_auto", status="confirmado",
         )
     except Exception as exc:
         logger.info(f"Sorteo {date_str} {draw_time_str} ya estaba registrado: {exc}")
