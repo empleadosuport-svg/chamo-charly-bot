@@ -248,19 +248,39 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     """Muestra la predicción oficial proveniente de Chamo Charly Producción."""
     pred = get_active_prediction()
     
+    # Evaluar horario y recomendación de banca
+    target_time = pred.get("target_time", "11:00")
+    ranking = pred.get("ranking", [])
+    
+    # Calcular prob acumulada
+    prob_acum = sum(it.get("probabilidad", 0.0) for it in ranking[:20])
+    
+    golden_hours = ["11:00", "10:00", "09:00", "19:00"]
+    volatile_hours = ["12:00", "18:00", "14:00", "15:00", "16:00"]
+    
+    if target_time in volatile_hours:
+        badge = "🛡️ PASE DE SORTEO (ALTA VOLATILIDAD)"
+        desc = "⚠️ Horario inestable. Se recomienda NO arriesgar capital."
+    elif target_time in golden_hours:
+        badge = "🚀 APUESTA FUERTE (+EV | ALTA CERTEZA)"
+        desc = "🔥 Horario de Oro detectado. La matemática está a tu favor."
+    else:
+        badge = "🟡 APUESTA MODERADA (STABLE)"
+        desc = "⚡ Horario de probabilidad media. Gestionar capital con cautela."
+
     def _eco_badge(item: dict) -> str:
         return " ⚡ *Eco 24h*" if item.get("eco_desplazado", 0.0) > 0.05 else ""
 
     top5_str = "\n".join([
-        f"  🥇 *{i+1}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
+        f"  🥇 *#{i+1:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top5'])
     ])
     top6_10_str = "\n".join([
-        f"  🥈 *{i+6}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
+        f"  🥈 *#{i+6:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top10'][5:10])
     ])
     top11_20_str = "\n".join([
-        f"  🥉 *{i+11}. {it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%}){_eco_badge(it)}"
+        f"  🥉 *#{i+11:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
         for i, it in enumerate(pred['top11_20'])
     ])
     escalation_str = "\n".join([
@@ -268,22 +288,28 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         for code, delta in pred.get('escalation', [])
     ])
 
-    financial_projection_str = (
-        "💰 *PROYECCIÓN DE INVERSIÓN (Paga 30x con $1/animal):*\n"
-        "  🛡️ *Malla Top 20 ($20 inv.):* Cobras *$30* (Ganancia neta: *+$10* | +50% ROI)\n"
-        "  🎯 *Top 10 ($10 inv.):* Cobras *$30* (Ganancia neta: *+$20* | +200% ROI)\n"
-        "  🏆 *Top 5 ($5 inv.):* Cobras *$30* (Ganancia neta: *+$25* | +500% ROI)"
-    )
-
     text = (
-        f"🎯 *PREDICCIÓN OFICIAL BMA (8 PILARES)*\n"
-        f"📅 *Objetivo:* {pred['target_date']} a las {pred['target_time']}\n"
-        f"📊 *Experiencia:* {pred['observations']} sorteos acumulados\n\n"
-        f"🏆 *TOP 5 SELECCIÓN ORO*\n{top5_str}\n\n"
-        f"🎯 *TOP 6–10 SELECCIÓN PLATA*\n{top6_10_str}\n\n"
-        f"🛡️ *TOP 11–20 SELECCIÓN BRONCE*\n{top11_20_str}\n\n"
-        f"⚡ *EMPUJE BAYESIANO*\n{escalation_str}\n\n"
-        f"{financial_projection_str}"
+        f"🎯 *CHAMO CHARLY BOT — PREDICCIÓN OFICIAL*\n"
+        f"📅 *Fecha:* {pred['target_date']} | ⏰ *Hora:* {pred['target_time']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *ESTADO DE BANCA:* {badge}\n"
+        f"_{desc}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 *CAPA 1: ATAQUE DIRECTO (Top 1 - 5)*\n"
+        f"_(Recomendado: $1.00 USD c/u | Ganancia limpia: +$20.00)_\n"
+        f"{top5_str}\n\n"
+        f"🛡️ *CAPA 2: COBERTURA DE RESONANCIA (Top 6 - 10)*\n"
+        f"_(Recomendado: $0.50 USD c/u | Ganancia limpia: +$5.00)_\n"
+        f"{top6_10_str}\n\n"
+        f"🕸️ *CAPA 3: ESCUDO ENJAMBRE ATRAPATODO (Top 11 - 20)*\n"
+        f"_(Recomendado: $0.25 USD c/u | Rescate: -$2.50)_\n"
+        f"{top11_20_str}\n\n"
+        f"⚡ *EMPUJE BAYESIANO*\n"
+        f"{escalation_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *Cerebro BMA Autónomo:* 11 Pilares Auto-Educados en Vivo\n"
+        f"📈 *Experiencia Acumulada:* {pred['observations']} sorteos\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
     keyboard = InlineKeyboardMarkup([
