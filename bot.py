@@ -494,8 +494,7 @@ async def verificar_callback(query, context):
 async def stats_callback(query, context):
     await query.edit_message_text("⏳ Generando reporte de estadísticas acumuladas...")
     try:
-        with connect_db(DATABASE_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with connect(DATABASE_PATH) as conn:
             total_draws = conn.execute("SELECT COUNT(*) AS c FROM sorteos").fetchone()["c"]
             recent_draws = conn.execute("SELECT * FROM predicciones WHERE acierto IS NOT NULL ORDER BY id DESC LIMIT 50").fetchall()
 
