@@ -476,14 +476,17 @@ async def verificar_callback(query, context):
         status = run_daily_verification(DATABASE_PATH)
         top5_str = "\n".join([f"  • {it}" for it in status["top5_principal"]])
         empuje_str = "\n".join([f"  🔥 {it}" for it in status["empuje_bayesiano"]])
+        pesos_str = "\n".join([f"  • {it}" for it in status.get("pesos_pilares", [])])
         text = (
-            f"🏥 *AUDITORÍA DEL SISTEMA*\n\n"
+            f"🏥 *AUDITORÍA Y ESTADO DEL SISTEMA*\n\n"
             f"📊 *Sorteos Acumulados:* {status['total_sorteos']}\n"
             f"📌 *Último Sorteo:* {status['ultimo_sorteo']}\n"
             f"🎯 *Próximo Objetivo:* {status['proximo_objetivo']}\n\n"
-            f"🏆 *TOP 5:*\n{top5_str}\n\n"
-            f"⚡ *EMPUJE BAYESIANO:*\n{empuje_str}\n\n"
-            f"💚 *Estado:* {status['salud_sistema']}"
+            f"⚡ *TASA DE APRENDIZAJE:* {status.get('tasa_aprendizaje', '1.00')}\n\n"
+            f"⚖️ *PESOS DE PILARES AUTO-EDUCADOS:*\n{pesos_str}\n\n"
+            f"🏆 *TOP 5 PRINCIPAL:*\n{top5_str}\n\n"
+            f"🔥 *EMPUJE BAYESIANO:*\n{empuje_str}\n\n"
+            f"💚 *Estado del Sistema:* {status['salud_sistema']}"
         )
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
     except Exception as exc:
