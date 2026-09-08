@@ -778,34 +778,32 @@ async def scheduler_loop(app: Application) -> None:
             hour = now.hour
             minute = now.minute
 
-            # ── Evento especial: 07:30 AM → Predicción del primer sorteo (08:00 AM) ──
-            # (antes del horario normal de 08:00-18:00)
-            if hour == 7 and 30 <= minute <= 45:
-                slot_key = f"{today_str}_07:30_predict"
+            # ── Evento especial: 07:15 AM → Predicción del primer sorteo (08:00 AM) ──
+            if hour == 7 and 15 <= minute <= 29:
+                slot_key = f"{today_str}_07:15_predict"
                 if not _is_executed(slot_key):
                     _mark_executed(slot_key)
-                    logger.info(f"[SCHEDULER VET] 07:30 → Generando predicción 08:00")
+                    logger.info(f"[SCHEDULER VET] 07:15 → Generando predicción 08:00")
                     await scheduled_prediction_job(app, force_target_date=today_str, force_target_time="08:00")
 
-            # ── Evento :15 → Verificar resultado oficial (08:15 hasta 19:15) ──
-            if 8 <= hour <= 19 and 15 <= minute <= 25:
+            # ── Evento :10 → Verificar resultado oficial (08:10 hasta 19:10) ──
+            if 8 <= hour <= 19 and 10 <= minute <= 20:
                 draw_time_str = f"{hour:02d}:00"
                 slot_key = f"{today_str}_{draw_time_str}_verify"
                 if not _is_executed(slot_key):
-                    logger.info(f"[SCHEDULER VET] {hour:02d}:15 → Verificando resultado {draw_time_str}")
+                    logger.info(f"[SCHEDULER VET] {hour:02d}:10 → Verificando resultado {draw_time_str}")
                     success = await scheduled_verification_job(app, today_str, draw_time_str)
                     if success:
                         _mark_executed(slot_key)
 
-            # ── Evento :30 → Predicción siguiente sorteo (09:30 hasta 18:30) ──
-            # (07:30 ya tiene su slot especial, 19:30 es el resumen)
-            if 8 <= hour <= 18 and 30 <= minute <= 45:
+            # ── Evento :15 → Predicción siguiente sorteo (08:15 hasta 18:15) ──
+            if 8 <= hour <= 18 and 15 <= minute <= 29:
                 next_hour = hour + 1
                 next_time_str = f"{next_hour:02d}:00"
-                slot_key = f"{today_str}_{hour:02d}:30_predict"
+                slot_key = f"{today_str}_{hour:02d}:15_predict"
                 if not _is_executed(slot_key):
                     _mark_executed(slot_key)
-                    logger.info(f"[SCHEDULER VET] {hour:02d}:30 → Generando predicción {next_time_str}")
+                    logger.info(f"[SCHEDULER VET] {hour:02d}:15 → Generando predicción {next_time_str}")
                     await scheduled_prediction_job(app, force_target_date=today_str, force_target_time=next_time_str)
 
             # ── Evento 19:30 PM → Resumen Diario Consolidado ──
