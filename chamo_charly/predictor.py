@@ -432,8 +432,28 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
     ]
     ranking.sort(key=lambda item: (-item["probabilidad"], item["codigo"]))
 
-    es_hora_oro = target_time in ["10:00", "11:00"]
-    clima_mercado = "🟢 ESTABLE (Condiciones Normales BMA)"
+    es_hora_oro = target_time in ["09:00", "10:00", "11:00", "19:00"]
+    es_hora_volatil = target_time in ["12:00", "14:00", "15:00", "16:00", "18:00"]
+
+    top5_bma_set = set(item["codigo"] for item in ranking[:5])
+    convergencia_count = 0
+    for p_name, p_sig in sig_target.items():
+        if p_sig:
+            p_top1 = max(ANIMALS, key=lambda c: p_sig.get(c, 0.0))
+            if p_top1 in top5_bma_set:
+                convergencia_count += 1
+
+    if (convergencia_count >= 4 and es_hora_oro) or (convergencia_count >= 5):
+        recomendacion_banca = "APUESTA_FUERTE"
+        justificacion = f"🚀 ALTA CERTEZA ({convergencia_count}/8 pilares coinciden). Horario de alta convergencia."
+    elif (convergencia_count >= 2 and not es_hora_volatil):
+        recomendacion_banca = "APUESTA_MODERADA"
+        justificacion = f"🟡 CONVERGENCIA PARCIAL ({convergencia_count}/8 pilares). Gestionar capital con cautela."
+    else:
+        recomendacion_banca = "DEJAR_PASAR"
+        justificacion = f"🛡️ PROTECCIÓN DE CAPITAL ($0.00 USD). Mercado inestable o sin convergencia ({convergencia_count}/8 pilares)."
+
+    clima_mercado = f"🟢 ESTABLE (Convergencia: {convergencia_count}/8 pilares)"
 
     return {
         "target_date": target_date,
@@ -442,6 +462,9 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
         "observations": len(relevant_rows),
         "es_hora_oro": es_hora_oro,
         "clima_mercado": clima_mercado,
+        "convergencia_pilares": convergencia_count,
+        "recomendacion_banca": recomendacion_banca,
+        "justificacion_prevuelo": justificacion,
         "top5": ranking[:5],
         "top10": ranking[:10],
         "top11_20": ranking[10:20],
@@ -449,7 +472,7 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
         "escalation": escalation,
         "explanation": [
             "Modelo BMA (Bayesian Model Averaging) formal con distribución Prior Dirichlet y 8 Pilares.",
-            "Incorpora Pilar Eco Desplazado 24h, Consenso Multi-Pilar, Filtro de Atraso Óptimo y Control de Repetición.",
+            "Filtro Pre-Vuelo de Diagnóstico en Tiempo Real activo para protección de capital.",
             "Efectividad demostrada en Sandbox: 61% Aciertos Top 20 directo y alta frecuencia en Banda Oro (Top 5).",
         ],
     }

@@ -256,18 +256,21 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     # Calcular prob acumulada
     prob_acum = sum(it.get("probabilidad", 0.0) for it in ranking[:20])
     
-    golden_hours = ["11:00", "10:00", "09:00", "19:00"]
-    volatile_hours = ["12:00", "18:00", "14:00", "15:00", "16:00"]
-    
-    if target_time in volatile_hours:
-        badge = "🛡️ PASE DE SORTEO (ALTA VOLATILIDAD)"
-        desc = "⚠️ Horario inestable. Se recomienda NO arriesgar capital."
-    elif target_time in golden_hours:
+    rec_banca = pred.get("recomendacion_banca", "APUESTA_MODERADA")
+    justificacion_txt = pred.get("justificacion_prevuelo", "")
+
+    if rec_banca == "APUESTA_FUERTE":
         badge = "🚀 APUESTA FUERTE (+EV | ALTA CERTEZA)"
-        desc = "🔥 Horario de Oro detectado. La matemática está a tu favor."
+        desc = justificacion_txt or "🔥 Horario de Alta Convergencia Pilar y Oportunidad."
+        capa_malla_desc = "_(Recomendación: Inversión en Malla Top 20 | Ganancia neta: +$10.00 USD)_"
+    elif rec_banca == "DEJAR_PASAR":
+        badge = "🛡️ DEJAR PASAR (PROTECCIÓN DE CAPITAL)"
+        desc = justificacion_txt or "⚠️ Mercado inestable o sin convergencia pilar. NO arriesgar capital."
+        capa_malla_desc = "_(Recomendación: $0.00 USD | CAPITAL PROTEGIDO 🟢)_"
     else:
         badge = "🟡 APUESTA MODERADA (STABLE)"
-        desc = "⚡ Horario de probabilidad media. Gestionar capital con cautela."
+        desc = justificacion_txt or "⚡ Horario regular. Gestionar capital con cautela."
+        capa_malla_desc = "_(Recomendación: Inversión reducida de resguardo)_"
 
     def _eco_badge(item: dict) -> str:
         return " ⚡ *Eco 24h*" if item.get("eco_desplazado", 0.0) > 0.05 else ""
@@ -293,22 +296,20 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         f"🎯 *CHAMO CHARLY BOT — PREDICCIÓN OFICIAL*\n"
         f"📅 *Fecha:* {pred['target_date']} | ⏰ *Hora:* {pred['target_time']}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *ESTADO DE BANCA:* {badge}\n"
+        f"📊 *DIAGNÓSTICO PRE-VUELO:* {badge}\n"
         f"_{desc}_\n"
+        f"{capa_malla_desc}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎯 *CAPA 1: ATAQUE DIRECTO (Top 1 - 5)*\n"
-        f"_(Recomendado: $1.00 USD c/u | Ganancia limpia: +$20.00)_\n"
         f"{top5_str}\n\n"
         f"🛡️ *CAPA 2: COBERTURA DE RESONANCIA (Top 6 - 10)*\n"
-        f"_(Recomendado: $0.50 USD c/u | Ganancia limpia: +$5.00)_\n"
         f"{top6_10_str}\n\n"
         f"🕸️ *CAPA 3: ESCUDO ENJAMBRE ATRAPATODO (Top 11 - 20)*\n"
-        f"_(Recomendado: $0.25 USD c/u | Rescate: -$2.50)_\n"
         f"{top11_20_str}\n\n"
         f"⚡ *EMPUJE BAYESIANO*\n"
         f"{escalation_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧠 *Cerebro BMA Autónomo:* 11 Pilares Auto-Educados en Vivo\n"
+        f"🧠 *Cerebro BMA Autónomo:* 8 Pilares Auto-Educados en Vivo\n"
         f"📈 *Experiencia Acumulada:* {pred['observations']} sorteos\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
