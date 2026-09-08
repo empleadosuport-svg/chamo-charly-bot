@@ -145,7 +145,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 Ver Predicción Oficial", callback_data="prediccion")],
         [InlineKeyboardButton("📊 Estado del Sistema", callback_data="verificar"),
-         InlineKeyboardButton("🔒 Cerrar Sesión", callback_data="logout")],
+         InlineKeyboardButton("📈 Estadísticas", callback_data="stats")],
+        [InlineKeyboardButton("🔒 Cerrar Sesión", callback_data="logout")],
     ])
 
 def back_keyboard() -> InlineKeyboardMarkup:
@@ -490,6 +491,41 @@ async def verificar_callback(query, context):
         await query.edit_message_text(f"❌ Error: {exc}", reply_markup=back_keyboard())
 
 
+async def stats_callback(query, context):
+    await query.edit_message_text("⏳ Generando reporte de estadísticas acumuladas...")
+    try:
+        with connect_db(DATABASE_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            total_draws = conn.execute("SELECT COUNT(*) AS c FROM sorteos").fetchone()["c"]
+            recent_draws = conn.execute("SELECT * FROM predicciones WHERE acierto IS NOT NULL ORDER BY id DESC LIMIT 50").fetchall()
+
+        if recent_draws:
+            top5_hits = sum(1 for r in recent_draws if r["posicion_ganador"] and r["posicion_ganador"] <= 5)
+            top10_hits = sum(1 for r in recent_draws if r["posicion_ganador"] and r["posicion_ganador"] <= 10)
+            top20_hits = sum(1 for r in recent_draws if r["posicion_ganador"] and r["posicion_ganador"] <= 20)
+            n_eval = len(recent_draws)
+            p_top5 = (top5_hits / n_eval) * 100
+            p_top10 = (top10_hits / n_eval) * 100
+            p_top20 = (top20_hits / n_eval) * 100
+        else:
+            n_eval = 0
+            p_top5 = p_top10 = p_top20 = 0.0
+
+        text = (
+            f"📈 *ESTADÍSTICAS Y RENDIMIENTO ACUMULADO*\n\n"
+            f"📊 *Total Sorteos Registrados:* {total_draws}\n"
+            f"🎯 *Últimos Sorteos Evaluados:* {n_eval}\n\n"
+            f"🏆 *Top 5 (Alta Cobertura):* {p_top5:.1f}%\n"
+            f"🎯 *Top 10 (Media Cobertura):* {p_top10:.1f}%\n"
+            f"🛡️ *Top 20 (Malla Cobertura):* {p_top20:.1f}%\n\n"
+            f"💡 *Nota:* Rendimiento verificado con modelo Dirichlet BMA 8-Pilares."
+        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+    except Exception as exc:
+        logger.error(f"Error generando estadísticas: {exc}", exc_info=True)
+        await query.edit_message_text(f"❌ Error: {exc}", reply_markup=back_keyboard())
+
+
 async def logout_callback(query, context):
     chat_id = query.message.chat_id
     authenticated_chats.discard(chat_id)
@@ -530,6 +566,8 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await registrar_resultado_callback(query, context, code)
     elif data == "verificar":
         await verificar_callback(query, context)
+    elif data == "stats":
+        await stats_callback(query, context)
     elif data == "logout":
         await logout_callback(query, context)
 

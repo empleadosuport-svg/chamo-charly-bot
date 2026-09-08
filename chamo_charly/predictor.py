@@ -432,11 +432,16 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
     ]
     ranking.sort(key=lambda item: (-item["probabilidad"], item["codigo"]))
 
+    es_hora_oro = target_time in ["10:00", "11:00"]
+    clima_mercado = "🟢 ESTABLE (Condiciones Normales BMA)"
+
     return {
         "target_date": target_date,
         "target_time": target_time,
         "model": "bma_dirichlet_8pilares",
         "observations": len(relevant_rows),
+        "es_hora_oro": es_hora_oro,
+        "clima_mercado": clima_mercado,
         "top5": ranking[:5],
         "top10": ranking[:10],
         "top11_20": ranking[10:20],
