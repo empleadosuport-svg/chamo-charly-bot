@@ -56,7 +56,8 @@ from chamo_charly.database import (
 )
 from chamo_charly.predictor import coverage_prediction, next_target
 from chamo_charly.scraper import fetch_lotto_activo_draw, fetch_lotto_activo_day
-from chamo_charly.verificador_diario import run_daily_verification
+from chamo_charly.verificador_diario import run_daily_verification, sync_historical_draws
+from chamo_charly.aprendizaje import actualizar_bma_con_resultado
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -197,8 +198,90 @@ def financial_result_label(rank: int) -> str:
             "❌ *Perdiste $20 USD* (Invertiste $20 en Malla Top 20 y el ganador quedó fuera)."
         )
 
+def format_prediction_message(pred: dict) -> str:
+    """Construye el texto formateado rico en Markdown para cualquier predicción oficial."""
+    target_date = pred.get("target_date") or pred.get("objetivo_fecha", "")
+    target_time = pred.get("target_time") or pred.get("objetivo_hora", "")
+    ranking = pred.get("ranking", [])
+    rec_banca = pred.get("recomendacion_banca", "APUESTA_MODERADA")
+    justificacion_txt = pred.get("justificacion_prevuelo", "")
+
+    if rec_banca == "APUESTA_FUERTE":
+        badge = "🚀 APUESTA FUERTE (+EV | ALTA CERTEZA)"
+        desc = justificacion_txt or "🔥 Horario de Alta Convergencia Pilar y Oportunidad."
+        capa_malla_desc = "_(Recomendación: Inversión en Malla Top 20 | Ganancia neta: +$10.00 USD)_"
+    elif rec_banca == "DEJAR_PASAR":
+        badge = "🛡️ DEJAR PASAR (PROTECCIÓN DE CAPITAL)"
+        desc = justificacion_txt or "⚠️ Mercado inestable o sin convergencia pilar. NO arriesgar capital."
+        capa_malla_desc = "_(Recomendación: $0.00 USD | CAPITAL PROTEGIDO 🟢)_"
+    else:
+        badge = "🟡 APUESTA MODERADA (STABLE)"
+        desc = justificacion_txt or "⚡ Horario regular. Gestionar capital con cautela."
+        capa_malla_desc = "_(Recomendación: Inversión reducida de resguardo)_"
+
+    def _eco_badge(item: dict) -> str:
+        return " ⚡ *Eco 24h*" if item.get("eco_desplazado", 0.0) > 0.05 else ""
+
+    top5 = pred.get("top5", ranking[:5])
+    top10 = pred.get("top10", ranking[:10])
+    top11_20 = pred.get("top11_20", ranking[10:20])
+
+    top5_str = "\n".join([
+        f"  🥇 *#{i+1:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
+        for i, it in enumerate(top5)
+    ])
+    top6_10_str = "\n".join([
+        f"  🥈 *#{i+6:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
+        for i, it in enumerate(top10[5:10])
+    ])
+    top11_20_str = "\n".join([
+        f"  🥉 *#{i+11:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
+        for i, it in enumerate(top11_20)
+    ])
+
+    escalation = pred.get("escalation", [])
+    escalation_items = []
+    for item in escalation:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            code, delta = item
+            escalation_items.append(f"  🔥 *{code} - {ANIMALS.get(code, code)}* (+{delta*100:.2f}%)")
+        elif isinstance(item, dict):
+            code = item.get("codigo", "")
+            delta = item.get("empuje", item.get("delta", 0.0))
+            escalation_items.append(f"  🔥 *{code} - {ANIMALS.get(code, code)}* (+{delta*100:.2f}%)")
+
+    escalation_str = "\n".join(escalation_items) if escalation_items else "  🔥 (Señales convergentes equilibradas)"
+
+    return (
+        f"🎯 *CHAMO CHARLY BOT — PREDICCIÓN OFICIAL*\n"
+        f"📅 *Fecha:* {target_date} | ⏰ *Hora:* {target_time}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *DIAGNÓSTICO PRE-VUELO:* {badge}\n"
+        f"_{desc}_\n"
+        f"{capa_malla_desc}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 *CAPA 1: ATAQUE DIRECTO (Top 1 - 5)*\n"
+        f"{top5_str}\n\n"
+        f"🛡️ *CAPA 2: COBERTURA DE RESONANCIA (Top 6 - 10)*\n"
+        f"{top6_10_str}\n\n"
+        f"🕸️ *CAPA 3: ESCUDO ENJAMBRE ATRAPATODO (Top 11 - 20)*\n"
+        f"{top11_20_str}\n\n"
+        f"⚡ *EMPUJE BAYESIANO*\n"
+        f"{escalation_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *Cerebro BMA Autónomo:* 8 Pilares Auto-Educados en Vivo\n"
+        f"📈 *Experiencia Acumulada:* {pred.get('observations', 0)} sorteos\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
 def get_active_prediction() -> dict:
     """Obtiene la predicción oficial guardada en la BD o la genera con coverage_prediction y la guarda."""
+    try:
+        sync_historical_draws(DATABASE_PATH, days_back=2)
+    except Exception as exc:
+        logger.warning(f"Sync error en get_active_prediction: {exc}")
+
     target_date, target_time = next_target(DATABASE_PATH, reference_time=now_vet())
     latest = latest_prediction(DATABASE_PATH)
     
@@ -218,6 +301,8 @@ def get_active_prediction() -> dict:
             "target_time": latest["objetivo_hora"],
             "observations": latest["observaciones"],
             "model": latest["modelo"],
+            "recomendacion_banca": latest.get("franja") or "APUESTA_MODERADA",
+            "justificacion_prevuelo": latest.get("correccion_motivo") or "🔥 Predicción BMA activa en base de datos.",
             "top5": ranking[:5],
             "top10": top10 if top10 else ranking[:10],
             "top11_20": ranking[10:20],
@@ -248,71 +333,7 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
                           edit_message=None) -> None:
     """Muestra la predicción oficial proveniente de Chamo Charly Producción."""
     pred = get_active_prediction()
-    
-    # Evaluar horario y recomendación de banca
-    target_time = pred.get("target_time", "11:00")
-    ranking = pred.get("ranking", [])
-    
-    # Calcular prob acumulada
-    prob_acum = sum(it.get("probabilidad", 0.0) for it in ranking[:20])
-    
-    rec_banca = pred.get("recomendacion_banca", "APUESTA_MODERADA")
-    justificacion_txt = pred.get("justificacion_prevuelo", "")
-
-    if rec_banca == "APUESTA_FUERTE":
-        badge = "🚀 APUESTA FUERTE (+EV | ALTA CERTEZA)"
-        desc = justificacion_txt or "🔥 Horario de Alta Convergencia Pilar y Oportunidad."
-        capa_malla_desc = "_(Recomendación: Inversión en Malla Top 20 | Ganancia neta: +$10.00 USD)_"
-    elif rec_banca == "DEJAR_PASAR":
-        badge = "🛡️ DEJAR PASAR (PROTECCIÓN DE CAPITAL)"
-        desc = justificacion_txt or "⚠️ Mercado inestable o sin convergencia pilar. NO arriesgar capital."
-        capa_malla_desc = "_(Recomendación: $0.00 USD | CAPITAL PROTEGIDO 🟢)_"
-    else:
-        badge = "🟡 APUESTA MODERADA (STABLE)"
-        desc = justificacion_txt or "⚡ Horario regular. Gestionar capital con cautela."
-        capa_malla_desc = "_(Recomendación: Inversión reducida de resguardo)_"
-
-    def _eco_badge(item: dict) -> str:
-        return " ⚡ *Eco 24h*" if item.get("eco_desplazado", 0.0) > 0.05 else ""
-
-    top5_str = "\n".join([
-        f"  🥇 *#{i+1:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
-        for i, it in enumerate(pred['top5'])
-    ])
-    top6_10_str = "\n".join([
-        f"  🥈 *#{i+6:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
-        for i, it in enumerate(pred['top10'][5:10])
-    ])
-    top11_20_str = "\n".join([
-        f"  🥉 *#{i+11:02d}. {it['codigo']} - {it['animal']}* ({it.get('probabilidad', 0.0):.2%}){_eco_badge(it)}"
-        for i, it in enumerate(pred['top11_20'])
-    ])
-    escalation_str = "\n".join([
-        f"  🔥 *{code} - {ANIMALS.get(code, code)}* (+{delta*100:.2f}%)"
-        for code, delta in pred.get('escalation', [])
-    ])
-
-    text = (
-        f"🎯 *CHAMO CHARLY BOT — PREDICCIÓN OFICIAL*\n"
-        f"📅 *Fecha:* {pred['target_date']} | ⏰ *Hora:* {pred['target_time']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *DIAGNÓSTICO PRE-VUELO:* {badge}\n"
-        f"_{desc}_\n"
-        f"{capa_malla_desc}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 *CAPA 1: ATAQUE DIRECTO (Top 1 - 5)*\n"
-        f"{top5_str}\n\n"
-        f"🛡️ *CAPA 2: COBERTURA DE RESONANCIA (Top 6 - 10)*\n"
-        f"{top6_10_str}\n\n"
-        f"🕸️ *CAPA 3: ESCUDO ENJAMBRE ATRAPATODO (Top 11 - 20)*\n"
-        f"{top11_20_str}\n\n"
-        f"⚡ *EMPUJE BAYESIANO*\n"
-        f"{escalation_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧠 *Cerebro BMA Autónomo:* 8 Pilares Auto-Educados en Vivo\n"
-        f"📈 *Experiencia Acumulada:* {pred['observations']} sorteos\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
+    text = format_prediction_message(pred)
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Actualizar Predicción", callback_data="prediccion"),
@@ -322,8 +343,7 @@ async def send_prediccion(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     if edit_message:
         await edit_message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
     else:
-        await context.bot.send_message(chat_id, text,
-                                       parse_mode="Markdown", reply_markup=keyboard)
+        await context.bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -441,6 +461,15 @@ async def registrar_resultado_callback(query, context, code: str):
                 verify_prediction(DATABASE_PATH, pred["id"], code, animal)
             except Exception as exc:
                 logger.warning(f"Auditoría predicción {pred.get('id')}: {exc}")
+
+        # 2b. Auto-Aprendizaje: actualizar BMA con el resultado real
+        try:
+            nuevos_pesos = actualizar_bma_con_resultado(
+                DATABASE_PATH, code, target_time_str, weekday_str
+            )
+            logger.info(f"🧠 BMA auto-aprendizaje aplicado. Top pilares: {list(nuevos_pesos.items())[:3]}")
+        except Exception as exc:
+            logger.warning(f"⚠️ Auto-aprendizaje BMA: {exc}")
 
         # 3. Generar y GUARDAR la siguiente predicción en la base de datos de producción
         next_pred = coverage_prediction(DATABASE_PATH)
@@ -613,6 +642,15 @@ async def scheduled_verification_job(app: Application, date_str: str, draw_time_
         except Exception as exc:
             logger.warning(f"Auditoría automática predicción {active_pred.get('id')}: {exc}")
 
+    # 3b. Auto-Aprendizaje automático: actualizar BMA con el resultado scrapeado
+    try:
+        nuevos_pesos = actualizar_bma_con_resultado(
+            DATABASE_PATH, code, draw_time_str, weekday_str
+        )
+        logger.info(f"🧠 BMA auto-aprendizaje automático. Top pilares: {list(nuevos_pesos.items())[:3]}")
+    except Exception as exc:
+        logger.warning(f"⚠️ Auto-aprendizaje BMA automático: {exc}")
+
     # 4. Transmitir alerta automática a Telegram
     text = (
         f"📢 *RESULTADO OFICIAL DETECTADO ({draw_time_str})*\n\n"
@@ -640,6 +678,13 @@ async def scheduled_prediction_job(
     calcula EXACTAMENTE para esa franja (evita que next_target() devuelva 08:00
     repetidamente porque la BD aún no tiene sorteos del día).
     """
+    try:
+        synced = sync_historical_draws(DATABASE_PATH, days_back=2)
+        if synced > 0:
+            logger.info(f"🔄 Auto-sync en scheduled_prediction_job: {synced} sorteos faltantes recuperados.")
+    except Exception as exc:
+        logger.warning(f"⚠️ Auto-sync en scheduled_prediction_job: {exc}")
+
     if force_target_date and force_target_time:
         from chamo_charly.predictor import coverage_prediction as _cov
         from datetime import datetime as _dt
@@ -649,38 +694,10 @@ async def scheduled_prediction_job(
         next_pred = coverage_prediction(DATABASE_PATH)
     save_prediction(DATABASE_PATH, next_pred)
 
-    top5_str = "\n".join([
-        f"  {i+1}. *{it['codigo']} - {it['animal']}* ({it['probabilidad']:.2%})"
-        for i, it in enumerate(next_pred['top5'])
-    ])
-    top6_10_str = "\n".join([
-        f"  {i+6}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
-        for i, it in enumerate(next_pred['top10'][5:10])
-    ])
-    top11_20_str = "\n".join([
-        f"  {i+11}. {it['codigo']} - {it['animal']} ({it['probabilidad']:.2%})"
-        for i, it in enumerate(next_pred['top11_20'])
-    ])
-
-    financial_projection_str = (
-        "💰 *PROYECCIÓN DE INVERSIÓN (Paga 30x con $1/animal):*\n"
-        "  🛡️ *Malla Top 20 ($20 inv.):* Cobras *$30* (Ganancia neta: *+$10* | +50% ROI)\n"
-        "  🎯 *Top 10 ($10 inv.):* Cobras *$30* (Ganancia neta: *+$20* | +200% ROI)\n"
-        "  🏆 *Top 5 ($5 inv.):* Cobras *$30* (Ganancia neta: *+$25* | +500% ROI)"
-    )
-
-    text = (
-        f"🔮 *PREDICCIÓN OFICIAL AUTOMÁTICA*\n"
-        f"📅 *Sorteo Objetivo:* {next_pred['target_date']} a las {next_pred['target_time']}\n"
-        f"📊 *Experiencia:* {next_pred['observations']} sorteos acumulados\n\n"
-        f"🏆 *TOP 5 PRINCIPAL*\n{top5_str}\n\n"
-        f"🎯 *TOP 6–10*\n{top6_10_str}\n\n"
-        f"🛡️ *TOP 11–20 (MALLA DE SEGURIDAD)*\n{top11_20_str}\n\n"
-        f"{financial_projection_str}"
-    )
+    text = format_prediction_message(next_pred)
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Ingresar Resultado", callback_data="resultado")],
-        [InlineKeyboardButton("⬅️ Menú Principal", callback_data="menu")],
+        [InlineKeyboardButton("🔄 Actualizar Predicción", callback_data="prediccion"),
+         InlineKeyboardButton("⬅️ Menú Principal", callback_data="menu")],
     ])
     await broadcast_message(app, text, reply_markup=keyboard)
 
@@ -846,6 +863,12 @@ async def run_bot():
 
 def main():
     init_db(DATABASE_PATH)
+    try:
+        synced = sync_historical_draws(DATABASE_PATH, days_back=2)
+        logger.info(f"🚀 Inicio Bot: {synced} sorteos históricos sincronizados.")
+    except Exception as exc:
+        logger.warning(f"⚠️ Sync inicial en main: {exc}")
+
     _load_authenticated_chats()
     _load_executed_schedules()
 

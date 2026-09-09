@@ -6,18 +6,68 @@ Verifica:
 3. Funcionamiento del motor BMA Dirichlet 7-Pilares y Suavización Laplace.
 4. Generación limpia de la predicción para el siguiente sorteo con Empuje Bayesiano.
 """
-from __future__ import annotations
-
-import sqlite3
+import logging
+from datetime import datetime, timedelta
 from pathlib import Path
-from chamo_charly.database import chronological_draws, recent_draws, latest_prediction
-from chamo_charly.predictor import bma_prediction
+from zoneinfo import ZoneInfo
 
+from chamo_charly.aprendizaje import actualizar_bma_con_resultado
+from chamo_charly.database import chronological_draws, insert_draw, latest_prediction
+from chamo_charly.predictor import bma_prediction
+from chamo_charly.scraper import fetch_lotto_activo_day
+
+logger = logging.getLogger(__name__)
 DATABASE_PATH = Path("/home/monkee/Documentos/Chamo Charly/data/chamo_charly.db")
+VET = ZoneInfo("America/Caracas")
+
+
+def sync_historical_draws(db_path: str | Path = DATABASE_PATH, days_back: int = 2) -> int:
+    """Sincroniza sorteos faltantes de los últimos N días desde lottoactivo.com.
+
+    Inserta sorteos no existentes en orden cronológico y ejecuta
+    `actualizar_bma_con_resultado()` para cada uno, garantizando que el
+    aprendizaje bayesiano esté 100% al día tras cualquier reinicio.
+    """
+    existing = chronological_draws(db_path)
+    existing_keys = {(r["fecha_sorteo"], r["hora_sorteo"]) for r in existing}
+
+    today = datetime.now(VET).date()
+    inserted_count = 0
+
+    for i in range(days_back, -1, -1):
+        date_dt = today - timedelta(days=i)
+        date_str = date_dt.strftime("%Y-%m-%d")
+        weekday_str = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"][date_dt.weekday()]
+        draws = fetch_lotto_activo_day(date_str)
+        if not draws:
+            continue
+        for d in sorted(draws, key=lambda x: x["hora_24"]):
+            key = (date_str, d["hora_24"])
+            if key not in existing_keys:
+                insert_draw(
+                    db_path,
+                    date_str,
+                    d["hora_24"],
+                    d["codigo"],
+                    d["animal"],
+                    weekday_str,
+                    source="auto_sync",
+                    status="confirmado",
+                )
+                try:
+                    actualizar_bma_con_resultado(db_path, d["codigo"], d["hora_24"], weekday_str)
+                except Exception as exc:
+                    logger.warning(f"Error actualizando BMA en sync {date_str} {d['hora_24']}: {exc}")
+                existing_keys.add(key)
+                inserted_count += 1
+                logger.info(f"🔄 Sync: Insertado y aprendido {date_str} {d['hora_24']} -> {d['codigo']} {d['animal']}")
+
+    return inserted_count
 
 
 def run_daily_verification(db_path: Path = DATABASE_PATH) -> dict:
     """Ejecuta una auditoría completa del estado de Producción post-sorteo."""
+    synced = sync_historical_draws(db_path, days_back=2)
     rows = chronological_draws(db_path)
     total_draws = len(rows)
     latest_draw = rows[-1] if rows else None

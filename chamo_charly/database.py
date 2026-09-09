@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS pesos_pilares_contexto (
     UNIQUE(pilar, hora, dia_semana)
 );
 
+CREATE TABLE IF NOT EXISTS pesos (
+    pilar TEXT PRIMARY KEY,
+    peso REAL NOT NULL,
+    actualizaciones INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS pruebas_historicas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     configuracion TEXT NOT NULL DEFAULT '{}',
@@ -208,16 +214,22 @@ CREATE TABLE IF NOT EXISTS auth_chats (
 );
 """
 
-PILLARS = ("base", "hora", "dia_hora", "markov", "reciente", "penalizacion", "piramide", "eco_desplazado")
+PILLARS = (
+    "base", "hora", "dia_hora", "markov", "reciente",
+    "penalizacion", "piramide", "eco_desplazado",
+    "disparadores_click", "estacionalidad_mes",
+)
 BASE_WEIGHTS = {
-    "base": 0.14,
-    "hora": 0.22,
-    "dia_hora": 0.16,
-    "markov": 0.12,
-    "reciente": 0.12,
-    "penalizacion": 0.08,
+    "base": 0.12,
+    "hora": 0.18,
+    "dia_hora": 0.14,
+    "markov": 0.11,
+    "reciente": 0.11,
+    "penalizacion": 0.07,
     "piramide": 0.05,
-    "eco_desplazado": 0.08,
+    "eco_desplazado": 0.07,
+    "disparadores_click": 0.09,
+    "estacionalidad_mes": 0.06,
 }
 
 def get_database_url() -> str | None:
@@ -445,14 +457,16 @@ def frequency_by_animal(database_path: str) -> list[dict]:
 
 def save_prediction(database_path: str | Path, prediction: dict) -> int:
     created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    rec_banca = prediction.get("recomendacion_banca", "APUESTA_MODERADA")
+    justificacion = prediction.get("justificacion_prevuelo", "")
     with connect(database_path) as connection:
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO predicciones
                 (creada_en, objetivo_fecha, objetivo_hora, modelo, observaciones,
                   top10_json, ranking_completo, probabilidades_json, probabilidad_conjunto,
-                  explicacion_json, estado, primera_creada_en)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?)
+                  explicacion_json, franja, correccion_motivo, estado, primera_creada_en)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?)
             """,
             (
                 created_at,
@@ -464,7 +478,9 @@ def save_prediction(database_path: str | Path, prediction: dict) -> int:
                 json.dumps(prediction["ranking"], ensure_ascii=False),
                 json.dumps(prediction["ranking"], ensure_ascii=False),
                 sum(item["probabilidad"] for item in prediction["top10"]),
-                json.dumps(prediction["explanation"], ensure_ascii=False),
+                json.dumps(prediction.get("explanation", []), ensure_ascii=False),
+                rec_banca,
+                justificacion,
                 created_at,
             ),
         )
@@ -472,9 +488,30 @@ def save_prediction(database_path: str | Path, prediction: dict) -> int:
             "SELECT id FROM predicciones WHERE objetivo_fecha = ? AND objetivo_hora = ?",
             (prediction["target_date"], prediction["target_time"]),
         ).fetchone()
-        if row is None:
-            raise RuntimeError("No se pudo recuperar la predicción existente.")
-        return int(row["id"])
+        if row:
+            connection.execute(
+                """
+                UPDATE predicciones
+                SET modelo = ?, observaciones = ?, top10_json = ?, ranking_completo = ?,
+                    probabilidades_json = ?, probabilidad_conjunto = ?, explicacion_json = ?,
+                    franja = ?, correccion_motivo = ?
+                WHERE id = ?
+                """,
+                (
+                    prediction["model"],
+                    prediction["observations"],
+                    json.dumps(prediction["top10"], ensure_ascii=False),
+                    json.dumps(prediction["ranking"], ensure_ascii=False),
+                    json.dumps(prediction["ranking"], ensure_ascii=False),
+                    sum(item["probabilidad"] for item in prediction["top10"]),
+                    json.dumps(prediction.get("explanation", []), ensure_ascii=False),
+                    rec_banca,
+                    justificacion,
+                    row["id"],
+                ),
+            )
+            return int(row["id"])
+        raise RuntimeError("No se pudo recuperar la predicción existente.")
 
 def latest_prediction(database_path: str | Path) -> dict | None:
     with connect(database_path) as connection:
@@ -788,4 +825,52 @@ def remove_auth_chat(database_path: str | Path, chat_id: int) -> None:
             "DELETE FROM auth_chats WHERE chat_id = ?",
             (chat_id,),
         )
+
+
+# ── BMA Alpha State Persistence ──────────────────────────────────────────────
+_BMA_ALPHA_KEY = "bma_alpha_json"
+
+
+def save_bma_alpha(database_path: str | Path, alpha: dict[str, float]) -> None:
+    """Persiste el estado Dirichlet alpha del BMA en la tabla `pesos`.
+
+    Usa el pilar centinela ``bma_alpha_json`` para guardar el dict completo
+    serializado como JSON en la columna ``peso`` (almacenada como TEXT gracias
+    al tipado dinámico de SQLite) y lleva el contador de actualizaciones.
+    """
+    alpha_json = json.dumps(alpha)
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    with connect(database_path) as conn:
+        exists = conn.execute(
+            "SELECT actualizaciones FROM pesos WHERE pilar = ?",
+            (_BMA_ALPHA_KEY,),
+        ).fetchone()
+        if exists:
+            conn.execute(
+                "UPDATE pesos SET peso = ?, actualizaciones = actualizaciones + 1 WHERE pilar = ?",
+                (alpha_json, _BMA_ALPHA_KEY),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO pesos (pilar, peso, actualizaciones) VALUES (?, ?, 1)",
+                (_BMA_ALPHA_KEY, alpha_json),
+            )
+
+
+def load_bma_alpha(database_path: str | Path) -> dict[str, float] | None:
+    """Carga el estado Dirichlet alpha del BMA desde la tabla ``pesos``.
+
+    Retorna ``None`` si no existe (primera ejecución → bootstrap completo).
+    """
+    with connect(database_path) as conn:
+        row = conn.execute(
+            "SELECT peso FROM pesos WHERE pilar = ?",
+            (_BMA_ALPHA_KEY,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return {k: float(v) for k, v in json.loads(row["peso"]).items()}
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return None
 

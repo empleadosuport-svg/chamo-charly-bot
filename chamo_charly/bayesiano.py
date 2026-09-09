@@ -17,14 +17,16 @@ ANIMALS = [
 ]
 
 DEFAULT_BASE_WEIGHTS = {
-    "base": 0.14,
-    "hora": 0.22,
-    "dia_hora": 0.16,
-    "markov": 0.12,
-    "reciente": 0.12,
+    "base": 0.12,
+    "hora": 0.15,
+    "dia_hora": 0.12,
+    "markov": 0.10,
+    "reciente": 0.10,
     "penalizacion_contextual": 0.08,
-    "piramide": 0.05,
+    "piramide": 0.08,
     "eco_desplazado": 0.08,
+    "disparadores_click": 0.10,
+    "estacionalidad_mes": 0.07,
 }
 
 

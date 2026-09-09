@@ -36,5 +36,8 @@ Thumbs.db
 data/
 *.csv
 
-# Archivos de prueba locales
+# Archivos de prueba locales y respaldos
 scratch/
+*.bak_*
+probar_sistema_produccion.py
+

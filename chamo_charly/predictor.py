@@ -8,7 +8,7 @@ from pathlib import Path
 
 from chamo_charly.analytics import exponential_scores, history_frame, markov_transitions
 from chamo_charly.catalog import ANIMALS
-from chamo_charly.database import BASE_WEIGHTS, context_weights, chronological_draws, recent_draws
+from chamo_charly.database import BASE_WEIGHTS, context_weights, chronological_draws, recent_draws, load_bma_alpha, save_bma_alpha
 from chamo_charly.bayesiano import BayesianModelAveraging
 
 EPSILON_BY_PILLAR = {
@@ -20,8 +20,15 @@ EPSILON_BY_PILLAR = {
     "reciente": 0.005,
     "penalizacion_contextual": 0.005,
     "eco_desplazado": 0.005,
+    "disparadores_click": 0.005,
+    "estacionalidad_mes": 0.003,
 }
-PILLARS_7_PIRAMIDE = ("base", "hora", "dia_hora", "markov", "reciente", "penalizacion_contextual", "piramide", "eco_desplazado")
+# 10 pilares activos: 8 originales + Pilar 9 (disparadores_click) + Pilar 10 (estacionalidad_mes)
+PILLARS_7_PIRAMIDE = (
+    "base", "hora", "dia_hora", "markov", "reciente",
+    "penalizacion_contextual", "piramide", "eco_desplazado",
+    "disparadores_click", "estacionalidad_mes",
+)
 
 
 def _draw_datetime(row: dict) -> datetime:
@@ -319,6 +326,160 @@ def _eco_desplazado_signal_laplace(rows: list[dict], target: dict) -> dict[str, 
     return _normalize_signal_eps(scores, eps=EPSILON_BY_PILLAR["eco_desplazado"])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pilar 9 — Disparadores Click (Ingeniería Inversa de Transiciones A→B)
+# ─────────────────────────────────────────────────────────────────────────────
+def _disparadores_click_signal_laplace(rows: list[dict], target: dict) -> dict[str, float]:
+    """Pilar 9: Detecta transiciones condicionales de alta frecuencia A→B.
+
+    Analiza el histórico para encontrar: "cuando salió X, al siguiente sorteo
+    de la misma hora dominó Y". Si el último resultado antes del target activa
+    un click, aplica un impulso probabilístico directo sobre el animal respuesta.
+    También evalúa patrones de 2 pasos (A→B→target).
+    """
+    if len(rows) < 2:
+        return _normalize_signal_eps({c: 0.0 for c in ANIMALS}, eps=EPSILON_BY_PILLAR["disparadores_click"])
+
+    target_hour = target.get("hora_sorteo", "")
+    target_hour_prefix = target_hour[:2] if target_hour else ""
+
+    # Filtrar solo sorteos de la misma hora para calcular transiciones contextuales
+    same_hour_rows = [r for r in rows if r.get("hora_sorteo", "")[:2] == target_hour_prefix]
+
+    scores: dict[str, float] = {c: 0.0 for c in ANIMALS}
+
+    # ── Paso 1: Transiciones de orden 1 en la misma hora (A → siguiente_A)
+    # Construimos tabla de frecuencias: trigger → {respuesta: count}
+    transitions_1: dict[str, dict[str, int]] = {}
+    for i in range(1, len(same_hour_rows)):
+        trigger = str(same_hour_rows[i - 1].get("codigo", "")).strip().zfill(2) if str(same_hour_rows[i - 1].get("codigo", "")).strip() != "0" else "0"
+        response = str(same_hour_rows[i].get("codigo", "")).strip().zfill(2) if str(same_hour_rows[i].get("codigo", "")).strip() != "0" else "0"
+        if trigger not in transitions_1:
+            transitions_1[trigger] = {}
+        transitions_1[trigger][response] = transitions_1[trigger].get(response, 0) + 1
+
+    # El último sorteo de la misma hora es el disparador actual
+    if same_hour_rows:
+        last_same_hour = str(same_hour_rows[-1].get("codigo", "")).strip()
+        if len(last_same_hour) == 1 and last_same_hour != "0":
+            last_same_hour = f"0{last_same_hour}"
+        if last_same_hour in transitions_1:
+            resp_counts = transitions_1[last_same_hour]
+            total_resp = sum(resp_counts.values())
+            if total_resp > 0:
+                for resp_code, cnt in resp_counts.items():
+                    if resp_code in ANIMALS:
+                        scores[resp_code] += (cnt / total_resp) * 0.70  # peso 70% al click directo
+
+    # ── Paso 2: Transiciones globales (último sorteo de cualquier hora → primera hora siguiente)
+    last_global = rows[-1]
+    trigger_g = str(last_global.get("codigo", "")).strip()
+    if len(trigger_g) == 1 and trigger_g != "0":
+        trigger_g = f"0{trigger_g}"
+
+    # Contamos en todo el histórico: sorteo_i → sorteo_{i+1}
+    global_transitions: dict[str, int] = {}
+    gtotal = 0
+    for i in range(len(rows) - 1):
+        trig = str(rows[i].get("codigo", "")).strip()
+        if len(trig) == 1 and trig != "0":
+            trig = f"0{trig}"
+        if trig == trigger_g:
+            nxt = str(rows[i + 1].get("codigo", "")).strip()
+            if len(nxt) == 1 and nxt != "0":
+                nxt = f"0{nxt}"
+            if nxt in ANIMALS:
+                global_transitions[nxt] = global_transitions.get(nxt, 0) + 1
+                gtotal += 1
+
+    if gtotal > 0:
+        for resp_code, cnt in global_transitions.items():
+            scores[resp_code] = scores.get(resp_code, 0.0) + (cnt / gtotal) * 0.30  # peso 30% al click global
+
+    return _normalize_signal_eps(scores, eps=EPSILON_BY_PILLAR["disparadores_click"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pilar 10 — Estacionalidad de Mes y Fase del Mes
+# ─────────────────────────────────────────────────────────────────────────────
+def _estacionalidad_mes_signal_laplace(rows: list[dict], target: dict) -> dict[str, float]:
+    """Pilar 10: Estacionalidad de mes y fase del mes.
+
+    Evalúa el target en 2 capas:
+    - Mes de calendario (1-12): refuerza animales dominantes en ese mes.
+    - Fase del mes: Inicio (1-10), Quincena (11-20), Cierre (21-31).
+
+    Combina ambas capas (70% mes + 30% fase) para obtener la señal final.
+    """
+    if not rows:
+        return _normalize_signal_eps({c: 0.0 for c in ANIMALS}, eps=EPSILON_BY_PILLAR["estacionalidad_mes"])
+
+    fecha_raw = target.get("fecha_sorteo", "")
+    if not fecha_raw:
+        return _normalize_signal_eps({c: 0.0 for c in ANIMALS}, eps=EPSILON_BY_PILLAR["estacionalidad_mes"])
+
+    try:
+        target_dt = datetime.strptime(fecha_raw, "%Y-%m-%d")
+        target_month = target_dt.month
+        target_day = target_dt.day
+    except ValueError:
+        return _normalize_signal_eps({c: 0.0 for c in ANIMALS}, eps=EPSILON_BY_PILLAR["estacionalidad_mes"])
+
+    # Fase del mes: 1=Inicio (1-10), 2=Quincena (11-20), 3=Cierre (21-31)
+    if target_day <= 10:
+        target_phase = 1
+    elif target_day <= 20:
+        target_phase = 2
+    else:
+        target_phase = 3
+
+    # ── Capa 1: Frecuencia por mes del mismo mes calendario
+    month_counts: dict[str, int] = {c: 0 for c in ANIMALS}
+    month_total = 0
+    for r in rows:
+        try:
+            r_month = int(r.get("fecha_sorteo", "0000-01").split("-")[1])
+        except (ValueError, IndexError):
+            continue
+        if r_month == target_month:
+            cod = str(r.get("codigo", "")).strip()
+            if len(cod) == 1 and cod != "0":
+                cod = f"0{cod}"
+            if cod in ANIMALS:
+                month_counts[cod] += 1
+                month_total += 1
+
+    # ── Capa 2: Frecuencia por fase del mes
+    phase_counts: dict[str, int] = {c: 0 for c in ANIMALS}
+    phase_total = 0
+    for r in rows:
+        try:
+            r_day = int(r.get("fecha_sorteo", "0000-00-01").split("-")[2])
+        except (ValueError, IndexError):
+            continue
+        if r_day <= 10:
+            r_phase = 1
+        elif r_day <= 20:
+            r_phase = 2
+        else:
+            r_phase = 3
+        if r_phase == target_phase:
+            cod = str(r.get("codigo", "")).strip()
+            if len(cod) == 1 and cod != "0":
+                cod = f"0{cod}"
+            if cod in ANIMALS:
+                phase_counts[cod] += 1
+                phase_total += 1
+
+    scores: dict[str, float] = {}
+    for code in ANIMALS:
+        m_prob = (month_counts[code] / month_total) if month_total > 0 else 0.0
+        p_prob = (phase_counts[code] / phase_total) if phase_total > 0 else 0.0
+        scores[code] = 0.70 * m_prob + 0.30 * p_prob
+
+    return _normalize_signal_eps(scores, eps=EPSILON_BY_PILLAR["estacionalidad_mes"])
+
+
 def bma_prediction(database_path: str | Path, reference_time: datetime | None = None) -> dict:
     """Build BMA Dirichlet 8-pillar prediction with 1-year experience, Adaptive Laplace,
     Eco Desplazado 24h, and 3 Top-20 Optimization Rules.
@@ -328,22 +489,51 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
     rows = chronological_draws(database_path)
     relevant_rows = [row for row in rows if _draw_datetime(row) < target_dt]
 
-    bma = BayesianModelAveraging(pillars=list(PILLARS_7_PIRAMIDE), eta=1.00)
-    for i in range(1, len(relevant_rows)):
-        t_r = relevant_rows[i]
-        h_r = relevant_rows[:i]
-        t_dict = {"fecha_sorteo": t_r["fecha_sorteo"], "hora_sorteo": t_r["hora_sorteo"], "dia_semana": t_r["dia_semana"]}
-        s_r = {
-            "base": _global_signal_laplace(h_r),
-            "hora": _hour_signal_laplace(h_r, t_r["hora_sorteo"]),
-            "dia_hora": _day_hour_signal_laplace(h_r, t_dict),
-            "markov": _markov_signal_laplace(h_r, t_r["hora_sorteo"]),
-            "reciente": _recent_signal_laplace(h_r, t_r["hora_sorteo"]),
-            "penalizacion_contextual": _context_penalty_signal_laplace(h_r, t_r["hora_sorteo"]),
-            "piramide": _piramide_signal_laplace(t_dict),
-            "eco_desplazado": _eco_desplazado_signal_laplace(h_r, t_dict),
-        }
-        bma.update(s_r, t_r["codigo"])
+    # ── Auto-Aprendizaje: cargar alpha guardado o hacer bootstrap completo ──
+    saved_alpha = load_bma_alpha(database_path)
+    if saved_alpha is not None:
+        # Camino rápido: restaurar estado acumulado + replay de últimos 60 sorteos
+        bma = BayesianModelAveraging(pillars=list(PILLARS_7_PIRAMIDE), eta=0.30)
+        bma.alpha = {p: saved_alpha.get(p, bma.alpha.get(p, 1.0)) for p in bma.pillars}
+        ventana = relevant_rows[-60:] if len(relevant_rows) > 60 else relevant_rows
+        for i in range(1, len(ventana)):
+            t_r = ventana[i]
+            h_r = relevant_rows[: len(relevant_rows) - len(ventana) + i]
+            t_dict = {"fecha_sorteo": t_r["fecha_sorteo"], "hora_sorteo": t_r["hora_sorteo"], "dia_semana": t_r["dia_semana"]}
+            s_r = {
+                "base": _global_signal_laplace(h_r[-200:] or h_r),
+                "hora": _hour_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "dia_hora": _day_hour_signal_laplace(h_r, t_dict),
+                "markov": _markov_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "reciente": _recent_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "penalizacion_contextual": _context_penalty_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "piramide": _piramide_signal_laplace(t_dict),
+                "eco_desplazado": _eco_desplazado_signal_laplace(h_r, t_dict),
+                "disparadores_click": _disparadores_click_signal_laplace(h_r, t_dict),
+                "estacionalidad_mes": _estacionalidad_mes_signal_laplace(h_r, t_dict),
+            }
+            bma.update(s_r, t_r["codigo"])
+    else:
+        # Primera vez: bootstrap completo desde los históricos y guardar alpha
+        bma = BayesianModelAveraging(pillars=list(PILLARS_7_PIRAMIDE), eta=1.00)
+        for i in range(1, len(relevant_rows)):
+            t_r = relevant_rows[i]
+            h_r = relevant_rows[:i]
+            t_dict = {"fecha_sorteo": t_r["fecha_sorteo"], "hora_sorteo": t_r["hora_sorteo"], "dia_semana": t_r["dia_semana"]}
+            s_r = {
+                "base": _global_signal_laplace(h_r),
+                "hora": _hour_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "dia_hora": _day_hour_signal_laplace(h_r, t_dict),
+                "markov": _markov_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "reciente": _recent_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "penalizacion_contextual": _context_penalty_signal_laplace(h_r, t_r["hora_sorteo"]),
+                "piramide": _piramide_signal_laplace(t_dict),
+                "eco_desplazado": _eco_desplazado_signal_laplace(h_r, t_dict),
+                "disparadores_click": _disparadores_click_signal_laplace(h_r, t_dict),
+                "estacionalidad_mes": _estacionalidad_mes_signal_laplace(h_r, t_dict),
+            }
+            bma.update(s_r, t_r["codigo"])
+        save_bma_alpha(database_path, bma.alpha)
 
     target_dict = {"fecha_sorteo": target_date, "hora_sorteo": target_time, "dia_semana": _weekday_name(target_date)}
     sig_target = {
@@ -355,6 +545,8 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
         "penalizacion_contextual": _context_penalty_signal_laplace(relevant_rows, target_time),
         "piramide": _piramide_signal_laplace(target_dict),
         "eco_desplazado": _eco_desplazado_signal_laplace(relevant_rows, target_dict),
+        "disparadores_click": _disparadores_click_signal_laplace(relevant_rows, target_dict),
+        "estacionalidad_mes": _estacionalidad_mes_signal_laplace(relevant_rows, target_dict),
     }
     probs = bma.combine_probabilities(sig_target, hour=target_time)
 
@@ -363,7 +555,7 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
     pilares_top5 = defaultdict(int)
     mean_thresh = 1.0 / len(ANIMALS)
     base_sig = sig_target.get("base", {})
-    for pilar in list(PILLARS_7_PIRAMIDE):
+    for pilar in PILLARS_7_PIRAMIDE:
         p_sig = sig_target.get(pilar, {})
         valid_codes = [c for c, val in p_sig.items() if val > mean_thresh]
         top5_codes = sorted(valid_codes, key=lambda c: (p_sig[c], base_sig.get(c, 0.0)), reverse=True)[:5]
@@ -414,6 +606,8 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
             "penalizacion_contextual": _context_penalty_signal_laplace(prev_rows, prev_hour),
             "piramide": _piramide_signal_laplace(prev_dict),
             "eco_desplazado": _eco_desplazado_signal_laplace(prev_rows, prev_dict),
+            "disparadores_click": _disparadores_click_signal_laplace(prev_rows, prev_dict),
+            "estacionalidad_mes": _estacionalidad_mes_signal_laplace(prev_rows, prev_dict),
         }
         prev_probs = bma.combine_probabilities(sig_prev, hour=prev_hour)
     else:
@@ -435,25 +629,33 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
     es_hora_oro = target_time in ["09:00", "10:00", "11:00", "19:00"]
     es_hora_volatil = target_time in ["12:00", "14:00", "15:00", "16:00", "18:00"]
 
+    top3_bma_set = set(item["codigo"] for item in ranking[:3])
     top5_bma_set = set(item["codigo"] for item in ranking[:5])
-    convergencia_count = 0
+
+    convergencia_top5 = 0
+    convergencia_top3 = 0
     for p_name, p_sig in sig_target.items():
         if p_sig:
             p_top1 = max(ANIMALS, key=lambda c: p_sig.get(c, 0.0))
             if p_top1 in top5_bma_set:
-                convergencia_count += 1
+                convergencia_top5 += 1
+            if p_top1 in top3_bma_set:
+                convergencia_top3 += 1
 
-    if (convergencia_count >= 4 and es_hora_oro) or (convergencia_count >= 5):
+    sig_eco = sig_target.get("eco_desplazado", {})
+    tiene_eco_top5 = any(sig_eco.get(c, 0.0) > 0.05 for c in top5_bma_set)
+
+    if (convergencia_top3 >= 3 and es_hora_oro and tiene_eco_top5) or (convergencia_top5 >= 5 and tiene_eco_top5):
         recomendacion_banca = "APUESTA_FUERTE"
-        justificacion = f"🚀 ALTA CERTEZA ({convergencia_count}/8 pilares coinciden). Horario de alta convergencia."
-    elif (convergencia_count >= 2 and not es_hora_volatil):
+        justificacion = f"🚀 ALTA CERTEZA (Convergencia Top 3: {convergencia_top3}/8 pilares + Eco 24h). Horario de alta oportunidad."
+    elif (convergencia_top5 >= 2 and not es_hora_volatil):
         recomendacion_banca = "APUESTA_MODERADA"
-        justificacion = f"🟡 CONVERGENCIA PARCIAL ({convergencia_count}/8 pilares). Gestionar capital con cautela."
+        justificacion = f"🟡 CONVERGENCIA PARCIAL ({convergencia_top5}/8 pilares). Gestionar capital con cautela."
     else:
         recomendacion_banca = "DEJAR_PASAR"
-        justificacion = f"🛡️ PROTECCIÓN DE CAPITAL ($0.00 USD). Mercado inestable o sin convergencia ({convergencia_count}/8 pilares)."
+        justificacion = f"🛡️ PROTECCIÓN DE CAPITAL ($0.00 USD). Mercado inestable o sin convergencia Top 3 ({convergencia_top5}/8 pilares)."
 
-    clima_mercado = f"🟢 ESTABLE (Convergencia: {convergencia_count}/8 pilares)"
+    clima_mercado = f"🟢 ESTABLE (Convergencia Top3: {convergencia_top3}/8 | Eco 24h: {'SÍ' if tiene_eco_top5 else 'NO'})"
 
     return {
         "target_date": target_date,
@@ -462,7 +664,7 @@ def bma_prediction(database_path: str | Path, reference_time: datetime | None = 
         "observations": len(relevant_rows),
         "es_hora_oro": es_hora_oro,
         "clima_mercado": clima_mercado,
-        "convergencia_pilares": convergencia_count,
+        "convergencia_pilares": convergencia_top5,
         "recomendacion_banca": recomendacion_banca,
         "justificacion_prevuelo": justificacion,
         "top5": ranking[:5],
