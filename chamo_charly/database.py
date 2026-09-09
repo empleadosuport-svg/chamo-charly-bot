@@ -828,33 +828,30 @@ def remove_auth_chat(database_path: str | Path, chat_id: int) -> None:
 
 
 # ── BMA Alpha State Persistence ──────────────────────────────────────────────
-_BMA_ALPHA_KEY = "bma_alpha_json"
-
-
 def save_bma_alpha(database_path: str | Path, alpha: dict[str, float]) -> None:
     """Persiste el estado Dirichlet alpha del BMA en la tabla `pesos`.
 
-    Usa el pilar centinela ``bma_alpha_json`` para guardar el dict completo
-    serializado como JSON en la columna ``peso`` (almacenada como TEXT gracias
-    al tipado dinámico de SQLite) y lleva el contador de actualizaciones.
+    Guarda cada pilar con clave ``bma_alpha_<pilar>`` y valor ``peso`` como float,
+    garantizando compatibilidad 100% tanto con SQLite como con PostgreSQL (DOUBLE PRECISION).
     """
-    alpha_json = json.dumps(alpha)
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
     with connect(database_path) as conn:
-        exists = conn.execute(
-            "SELECT actualizaciones FROM pesos WHERE pilar = ?",
-            (_BMA_ALPHA_KEY,),
-        ).fetchone()
-        if exists:
-            conn.execute(
-                "UPDATE pesos SET peso = ?, actualizaciones = actualizaciones + 1 WHERE pilar = ?",
-                (alpha_json, _BMA_ALPHA_KEY),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO pesos (pilar, peso, actualizaciones) VALUES (?, ?, 1)",
-                (_BMA_ALPHA_KEY, alpha_json),
-            )
+        for pilar, val in alpha.items():
+            key = f"bma_alpha_{pilar}"
+            val_float = float(val)
+            exists = conn.execute(
+                "SELECT actualizaciones FROM pesos WHERE pilar = ?",
+                (key,),
+            ).fetchone()
+            if exists:
+                conn.execute(
+                    "UPDATE pesos SET peso = ?, actualizaciones = actualizaciones + 1 WHERE pilar = ?",
+                    (val_float, key),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO pesos (pilar, peso, actualizaciones) VALUES (?, ?, 1)",
+                    (key, val_float),
+                )
 
 
 def load_bma_alpha(database_path: str | Path) -> dict[str, float] | None:
@@ -863,14 +860,28 @@ def load_bma_alpha(database_path: str | Path) -> dict[str, float] | None:
     Retorna ``None`` si no existe (primera ejecución → bootstrap completo).
     """
     with connect(database_path) as conn:
-        row = conn.execute(
-            "SELECT peso FROM pesos WHERE pilar = ?",
-            (_BMA_ALPHA_KEY,),
-        ).fetchone()
-    if row is None:
-        return None
-    try:
-        return {k: float(v) for k, v in json.loads(row["peso"]).items()}
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
+        rows = conn.execute(
+            "SELECT pilar, peso FROM pesos WHERE pilar LIKE 'bma_alpha_%'"
+        ).fetchall()
+        if not rows:
+            # Fallback legacy para SQLite si existía bma_alpha_json previo
+            legacy = conn.execute(
+                "SELECT peso FROM pesos WHERE pilar = 'bma_alpha_json'"
+            ).fetchone()
+            if legacy:
+                try:
+                    return {k: float(v) for k, v in json.loads(legacy["peso"]).items()}
+                except Exception:
+                    return None
+            return None
+
+        alpha = {}
+        for r in rows:
+            pilar_name = r["pilar"].replace("bma_alpha_", "")
+            try:
+                alpha[pilar_name] = float(r["peso"])
+            except (ValueError, TypeError):
+                pass
+        return alpha if alpha else None
+
 
