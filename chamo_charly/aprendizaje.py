@@ -15,8 +15,10 @@ Uso:
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from chamo_charly.bayesiano import BayesianModelAveraging
 from chamo_charly.database import (
@@ -40,65 +42,20 @@ from chamo_charly.predictor import (
 
 logger = logging.getLogger(__name__)
 
+VET = ZoneInfo("America/Caracas")
+
 # Cuántos sorteos recientes se usan para la actualización incremental.
 # En bootstrap (primera vez) se procesan TODOS los históricos.
 _VENTANA_INCREMENTAL = 60
 
 
-def _build_signals(history: list[dict], target: dict) -> dict[str, dict[str, float]]:
-    """Construye el dict de señales de los 10 pilares para un sorteo objetivo."""
-    return {
-        "base": _global_signal_laplace(history),
-        "hora": _hour_signal_laplace(history, target["hora_sorteo"]),
-        "dia_hora": _day_hour_signal_laplace(history, target),
-        "markov": _markov_signal_laplace(history, target["hora_sorteo"]),
-        "reciente": _recent_signal_laplace(history, target["hora_sorteo"]),
-        "penalizacion_contextual": _context_penalty_signal_laplace(history, target["hora_sorteo"]),
-        "piramide": _piramide_signal_laplace(target),
-        "eco_desplazado": _eco_desplazado_signal_laplace(history, target),
-        "disparadores_click": _disparadores_click_signal_laplace(history, target),
-        "estacionalidad_mes": _estacionalidad_mes_signal_laplace(history, target),
-    }
+def _get_eta_actual() -> float:
+    """Retorna eta=0.70 si estamos en el periodo Turbo (7 días hasta 2026-09-16), o 0.30 normal."""
+    today_str = datetime.now(VET).strftime("%Y-%m-%d")
+    if today_str <= "2026-09-16":
+        return 0.70
+    return 0.30
 
-
-def bootstrap_bma_desde_historico(database_path: str | Path) -> dict[str, float]:
-    """Entrena el BMA desde cero sobre todos los sorteos históricos.
-
-    Solo se ejecuta la primera vez (cuando no hay alpha guardado en DB).
-    Recorre cronológicamente todos los sorteos, calcula las señales de los 8
-    pilares y llama a bma.update() por cada resultado, acumulando evidencia
-    real en el vector alpha de Dirichlet.
-
-    Returns:
-        El alpha final (dict pilar -> valor float) guardado en DB.
-    """
-    rows = chronological_draws(database_path)
-    total = len(rows)
-    logger.info(f"Iniciando bootstrap BMA: procesando {total} sorteos históricos...")
-
-    bma = BayesianModelAveraging(
-        pillars=list(PILLARS_7_PIRAMIDE),
-        eta=0.80,   # Tasa de aprendizaje alta para el bootstrap inicial
-    )
-
-    for i in range(1, total):
-        t_row = rows[i]
-        h_rows = rows[:i]
-        target = {
-            "fecha_sorteo": t_row["fecha_sorteo"],
-            "hora_sorteo": t_row["hora_sorteo"],
-            "dia_semana": t_row["dia_semana"],
-        }
-        signals = _build_signals(h_rows, target)
-        bma.update(signals, t_row["codigo"])
-
-        if i % 500 == 0:
-            logger.info(f"  Bootstrap: {i}/{total - 1} sorteos procesados")
-
-    save_bma_alpha(database_path, bma.alpha)
-    pesos = bma.get_expected_weights()
-    logger.info(f"Bootstrap completado. Pesos aprendidos: {pesos}")
-    return bma.alpha
 
 
 def actualizar_bma_con_resultado(
@@ -154,9 +111,10 @@ def actualizar_bma_con_resultado(
         bootstrap_bma_desde_historico(database_path)
         saved_alpha = load_bma_alpha(database_path)
 
+    eta_val = _get_eta_actual()
     bma = BayesianModelAveraging(
         pillars=list(PILLARS_7_PIRAMIDE),
-        eta=0.30,   # Tasa conservadora para actualizaciones incrementales
+        eta=eta_val,   # Modo Turbo 0.70 (hasta 2026-09-16) / 0.30 normal
     )
     if saved_alpha:
         bma.alpha = {p: saved_alpha.get(p, bma.alpha.get(p, 1.0)) for p in bma.pillars}
